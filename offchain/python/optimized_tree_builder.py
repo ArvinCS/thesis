@@ -472,7 +472,6 @@ class HierarchicalTreeBuilder:
 
             # Determine if we should rebuild based on the effective learning mode
             should_rebuild = False
-            print("CCC")
             if effective_mode == LearningMode.IMMEDIATE:
                 should_rebuild = True
                 if config.verbose_logging:
