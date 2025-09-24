@@ -37,7 +37,6 @@ def generate_codes_from_tree(root_node):
     codes = {}
     if root_node is None:
         return codes
-    print("ccc")
     # Use a stack to simulate recursion
     stack = [(root_node, "")]
         
@@ -164,7 +163,6 @@ class TraditionalMultiproofWithHuffmanBuilder:
         if len(final_items_with_freq) > 1:
             huffman_root = build_huffman_tree(final_items_with_freq)
             codebook = generate_codes_from_tree(huffman_root)
-            print("bbb")
             # Sort items based on Huffman codes
             def get_sort_key(item):
                 code = codebook.get(item, "")
@@ -180,7 +178,6 @@ class TraditionalMultiproofWithHuffmanBuilder:
             sorted_final_items = final_items
         
         # --- 5. Build the Flat Merkle Tree ---
-        print("FFF")
         self.ordered_leaves_hex = []
         for item in sorted_final_items:
             self.ordered_leaves_hex.extend(item.get_leaf_hashes_hex())
