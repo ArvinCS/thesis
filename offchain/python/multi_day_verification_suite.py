@@ -697,7 +697,7 @@ class MultiDayVerificationSuite:
             for approach_name, system in tree_systems.items():
                 try:
                     result = self._test_single_verification_event(
-                        approach_name, system, event, day_idx, event_idx
+                        approach_name, system, event, day_idx, event_idx, end_of_day=(event_idx == len(test_events)-1)
                     )
                     results.append(result)
                 except Exception as e:
@@ -711,7 +711,7 @@ class MultiDayVerificationSuite:
         
         return results
     
-    def _test_single_verification_event(self, approach_name, system, event, day_idx, event_idx):
+    def _test_single_verification_event(self, approach_name, system, event, day_idx, event_idx, end_of_day=False):
         """Test a single verification event with one approach."""
         start_time = time.time()
         
@@ -736,8 +736,8 @@ class MultiDayVerificationSuite:
                     estimated_gas = f"Error: {e}"
             
             verification_time = time.time() - start_time
-            
-            self._add_learning_event(approach_name, system, event)
+
+            self._add_learning_event(approach_name, system, event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'day': day_idx,
@@ -819,7 +819,7 @@ class MultiDayVerificationSuite:
             
             verification_time = time.time() - start_time
             
-            self._add_learning_event(approach_name, system, event)
+            self._add_learning_event(approach_name, system, event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'day': day_idx,
@@ -917,7 +917,7 @@ class MultiDayVerificationSuite:
             
             verification_time = time.time() - start_time
             
-            self._add_learning_event(approach_name, system, event)
+            self._add_learning_event(approach_name, system, event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'day': day_idx,
@@ -985,7 +985,7 @@ class MultiDayVerificationSuite:
             
             verification_time = time.time() - start_time
             
-            self._add_learning_event(approach_name, system, event)
+            self._add_learning_event(approach_name, system, event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'day': day_idx,
@@ -1107,7 +1107,7 @@ class MultiDayVerificationSuite:
             
             verification_time = time.time() - start_time
             
-            self._add_learning_event(approach_name, system["system"], event)
+            self._add_learning_event(approach_name, system["system"], event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'day': day_idx,
@@ -1225,7 +1225,7 @@ class MultiDayVerificationSuite:
             
             verification_time = time.time() - start_time
 
-            self._add_learning_event(approach_name, system["system"], event)
+            self._add_learning_event(approach_name, system["system"], event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'day': day_idx,
@@ -1593,14 +1593,14 @@ class MultiDayVerificationSuite:
                 other_events.append((i, event))
         
         print(f"Testing {len(cross_province_4plus_events)} events with 4+ provinces...")
-        print(f"Testing {min(50, len(other_events))} other events for comparison...")
+        print(f"Testing {len(other_events)} other events for comparison...")
         
         # Test all 4+ province events
         for event_idx, event in cross_province_4plus_events:
             for approach_name, system in tree_systems.items():
                 try:
                     result = self._test_cross_province_verification_event(
-                        approach_name, system, event, event_idx, True  # True = is 4+ province event
+                        approach_name, system, event, event_idx, True, end_of_day=(event_idx == len(cross_province_4plus_events)-1)
                     )
                     results.append(result)
                 except Exception as e:
@@ -1613,12 +1613,11 @@ class MultiDayVerificationSuite:
                     })
         
         # Test sample of other events for comparison
-        sample_other_events = random.sample(other_events, min(50, len(other_events)))
-        for event_idx, event in sample_other_events:
+        for event_idx, event in other_events:
             for approach_name, system in tree_systems.items():
                 try:
                     result = self._test_cross_province_verification_event(
-                        approach_name, system, event, event_idx, False  # False = not 4+ province event
+                        approach_name, system, event, event_idx, False, end_of_day=(event_idx == len(other_events)-1)
                     )
                     results.append(result)
                 except Exception as e:
@@ -1631,7 +1630,7 @@ class MultiDayVerificationSuite:
         
         return results
 
-    def _test_cross_province_verification_event(self, approach_name, system, event, event_idx, is_4plus_province):
+    def _test_cross_province_verification_event(self, approach_name, system, event, event_idx, is_4plus_province, end_of_day=False):
         """Test a single cross-province verification event."""
         start_time = time.time()
         
@@ -1662,7 +1661,7 @@ class MultiDayVerificationSuite:
             
             verification_time = time.time() - start_time
             
-            self._add_learning_event(approach_name, system, event)
+            self._add_learning_event(approach_name, system, event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'event': event_idx,
@@ -1674,8 +1673,6 @@ class MultiDayVerificationSuite:
                 'proof_size_bytes': proof_size,
                 'estimated_gas': estimated_gas,
                 'actual_gas_used': actual_gas_used,
-                'local_verification_passed': is_valid,
-                'reason': reason
             }
         
         elif approach_name == 'traditional_multiproof':
@@ -1730,7 +1727,7 @@ class MultiDayVerificationSuite:
             
             verification_time = time.time() - start_time
             
-            self._add_learning_event(approach_name, system, event)
+            self._add_learning_event(approach_name, system, event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'event': event_idx,
@@ -1742,7 +1739,6 @@ class MultiDayVerificationSuite:
                 'proof_size_bytes': proof_size,
                 'estimated_gas': estimated_gas,
                 'actual_gas_used': actual_gas_used,
-                'local_verification_passed': True
             }
         elif approach_name == 'traditional_single_proof':
             # Traditional single proof approach
@@ -1795,7 +1791,7 @@ class MultiDayVerificationSuite:
 
             verification_time = time.time() - start_time
             
-            self._add_learning_event(approach_name, system, event)
+            self._add_learning_event(approach_name, system, event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'event': event_idx,
@@ -1807,7 +1803,6 @@ class MultiDayVerificationSuite:
                 'proof_size_bytes': total_proof_size,
                 'estimated_gas': estimated_gas,
                 'actual_gas_used': actual_gas_used,
-                'local_verification_passed': True
             }
         
         elif approach_name == 'traditional_huffman':
@@ -1864,7 +1859,7 @@ class MultiDayVerificationSuite:
             
             verification_time = time.time() - start_time
             
-            self._add_learning_event(approach_name, system, event)
+            self._add_learning_event(approach_name, system, event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'event': event_idx,
@@ -1876,7 +1871,6 @@ class MultiDayVerificationSuite:
                 'proof_size_bytes': proof_size,
                 'estimated_gas': estimated_gas,
                 'actual_gas_used': actual_gas_used,
-                'local_verification_passed': True
             }
         
         elif approach_name == 'clustered_flat':
@@ -1956,7 +1950,7 @@ class MultiDayVerificationSuite:
             
             verification_time = time.time() - start_time
             
-            self._add_learning_event(approach_name, system, event)
+            self._add_learning_event(approach_name, system, event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'event': event_idx,
@@ -2043,7 +2037,7 @@ class MultiDayVerificationSuite:
             
             verification_time = time.time() - start_time
 
-            self._add_learning_event(approach_name, system, event)
+            self._add_learning_event(approach_name, system, event, end_of_day=end_of_day)
             return {
                 'approach': approach_name,
                 'event': event_idx,
@@ -2223,7 +2217,7 @@ class MultiDayVerificationSuite:
         
         return analysis
 
-    def _add_learning_event(self, approach_name, system, event, day_idx=None):
+    def _add_learning_event(self, approach_name, system, event, end_of_day=False):
         """
         Add learning event to the appropriate system component based on approach.
         Unified method that handles all learning modes and approaches.
@@ -2254,35 +2248,36 @@ class MultiDayVerificationSuite:
                         if province in manager.province_builders:
                             tree_builder = manager.province_builders[province]
                             if hasattr(tree_builder, 'add_verification_event'):
-                                tmp_should_rebuild, current_root = tree_builder.add_verification_event(event, learning_mode=config.mode)
+                                tmp_should_rebuild, current_root = tree_builder.add_verification_event(event, learning_mode=config.mode, end_of_day=end_of_day)
                                 if config.verbose_logging:
                                     print(f"      Province {province} - rebuild: {should_rebuild}")
                                 should_rebuild |= tmp_should_rebuild
                             else:
                                 raise AttributeError(f"No add_verification_event method for province tree {province}")
                     
-                    current_root = manager.build_jurisdiction_tree_only()
+                    if should_rebuild:
+                        current_root = manager.build_jurisdiction_tree_only()
                 else:
                     raise AttributeError(f"No province_trees attribute in manager for {approach_name}")
             elif approach_name == 'traditional_huffman' and 'builder' in system:
                 # For traditional huffman approach
                 builder = system['builder']
                 if hasattr(builder, 'add_verification_event'):
-                    should_rebuild, current_root = builder.add_verification_event(event, learning_mode=config.mode)
+                    should_rebuild, current_root = builder.add_verification_event(event, learning_mode=config.mode, end_of_day=end_of_day)
                 else:
                     raise AttributeError(f"No add_verification_event method for {approach_name}")
             elif approach_name == 'clustered_flat' and 'builder' in system:
                 # For clustered flat approach
                 builder = system['builder']
                 if hasattr(builder, 'add_verification_event'):
-                    should_rebuild, current_root = builder.add_verification_event(event, learning_mode=config.mode)
+                    should_rebuild, current_root = builder.add_verification_event(event, learning_mode=config.mode, end_of_day=end_of_day)
                 else:
                     raise AttributeError(f"No add_verification_event method for {approach_name}")
             elif approach_name == 'clustered_flat_with_merkle' and 'builder' in system:
                 # For clustered flat with merkle approach
                 builder = system['builder']
                 if hasattr(builder, 'add_verification_event'):
-                    should_rebuild, current_root = builder.add_verification_event(event, learning_mode=config.mode)
+                    should_rebuild, current_root = builder.add_verification_event(event, learning_mode=config.mode, end_of_day=end_of_day)
                 else:
                     raise AttributeError(f"No add_verification_event method for {approach_name}")
             # Add more approaches as needed

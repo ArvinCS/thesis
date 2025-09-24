@@ -440,7 +440,7 @@ class HierarchicalTreeBuilder:
         except Exception as e:
             return None, f"Multiproof processing error: {str(e)}"
     
-    def add_learning_event(self, verified_properties, learning_mode=None):
+    def add_learning_event(self, verified_properties, learning_mode=None, end_of_day=False):
         """
         Add verification event with unified learning support.
         
@@ -472,7 +472,7 @@ class HierarchicalTreeBuilder:
 
             # Determine if we should rebuild based on the effective learning mode
             should_rebuild = False
-            
+            print("CCC")
             if effective_mode == LearningMode.IMMEDIATE:
                 should_rebuild = True
                 if config.verbose_logging:
@@ -482,9 +482,9 @@ class HierarchicalTreeBuilder:
                 if should_rebuild and config.verbose_logging:
                     print(f"📚 Batch learning triggered (every {config.batch_size} verifications)")
             elif effective_mode == LearningMode.DAILY:
-                should_rebuild = False  # Rebuild only at end of day
-                if config.verbose_logging:
-                    print(f"📚 Daily learning mode - no immediate rebuild")
+                should_rebuild = end_of_day
+                if should_rebuild and config.verbose_logging:
+                    print(f"📚 Daily learning triggered (verification #{self.verification_count})")
             elif effective_mode == LearningMode.HYBRID:
                 # Use immediate learning for simple events, batch for complex ones
                 if len(verified_properties) < config.immediate_threshold:
@@ -499,11 +499,15 @@ class HierarchicalTreeBuilder:
                 should_rebuild = False
                 if config.verbose_logging:
                     print(f"📚 Learning disabled - no rebuild")
-            
+            print("YYY")
             if should_rebuild:
+                print("ZZZ")
                 old_root = self.merkle_root
+                print("AAA")
                 old_leaf_order = self.ordered_leaves_hex.copy() if self.ordered_leaves_hex else []
+                print("DDD")
                 self.build()
+                print("EEE")
                 if config.verbose_logging:
                     print(f"✅ Tree rebuilt after verification #{self.verification_count}")
                 if old_root != self.merkle_root and config.verbose_logging:
@@ -521,10 +525,11 @@ class HierarchicalTreeBuilder:
             self.build()
             return True, self.merkle_root
 
-    def add_verification_event(self, verified_properties):
+    def add_verification_event(self, verified_properties, learning_mode=None, end_of_day=False):
         """Add new verification event to compressed traffic logs (backward compatibility)."""
-        self.add_learning_event(verified_properties, learning_mode="IMMEDIATE")
-    
+        print(f"EOD: {end_of_day}")
+        return self.add_learning_event(verified_properties, learning_mode, end_of_day)
+
     def get_compression_stats(self):
         """Get compression statistics."""
         if not hasattr(self, 'compressed_traffic') or self.compressed_traffic.total_events == 0:

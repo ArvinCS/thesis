@@ -214,7 +214,7 @@ class PerformanceVisualizer:
         self._create_gas_cost_per_property_chart(gas_data, selected_approaches)
         self._create_cross_province_gas_analysis_chart(gas_data, selected_approaches)
         
-        # Calculate and display gas optimization summary
+        # Calculate and display comprehensive gas optimization summary
         self._calculate_gas_optimization_summary(gas_data, selected_approaches)
     
     def _create_multi_day_gas_comparison_chart(self, gas_data: Dict[str, Dict[int, List[Dict]]], selected_approaches: List[str]):
@@ -262,7 +262,7 @@ class PerformanceVisualizer:
                     f'{avg_cost:,.0f}\n({count} events)', ha='center', va='bottom', 
                     fontweight='bold', fontsize=9)
         
-        ax1.set_title('Average Gas Cost Comparison\n(Multi-day Data with Error Bars)', fontweight='bold')
+        ax1.set_title('Average Absolute Gas Cost Comparison\n(Total cost per verification event)', fontweight='bold')
         ax1.set_ylabel('Average Gas Cost (wei)')
         ax1.tick_params(axis='x', rotation=45)
         ax1.grid(True, alpha=0.3, axis='y')
@@ -410,8 +410,9 @@ class PerformanceVisualizer:
         avg_efficiency = []
         
         for approach in approaches:
-            efficiencies = [e['efficiency'] for e in efficiency_data[approach]]
-            avg_efficiency.append(np.mean(efficiencies))
+            total_gas_costs = [e['total_gas'] for e in efficiency_data[approach]]
+            total_property_count = sum(e['properties'] for e in efficiency_data[approach])
+            avg_efficiency.append(sum(total_gas_costs) / total_property_count)
         
         colors = [self.color_schemes.get(app, '#808080') for app in approaches]
         bars = ax1.bar(approaches, avg_efficiency, color=colors, alpha=0.7)
@@ -421,7 +422,7 @@ class PerformanceVisualizer:
             ax1.text(bar.get_x() + bar.get_width()/2., bar.get_height() + max(avg_efficiency) * 0.01,
                     f'{eff:,.0f}', ha='center', va='bottom', fontweight='bold')
         
-        ax1.set_title('Average Gas Cost per Property\n(Efficiency Comparison)', fontweight='bold')
+        ax1.set_title('Gas Efficiency per Property\n(Lower is better - gas per group of documents within same property verified)', fontweight='bold')
         ax1.set_ylabel('Gas Cost per Property (wei)')
         ax1.tick_params(axis='x', rotation=45)
         ax1.grid(True, alpha=0.3, axis='y')

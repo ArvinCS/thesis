@@ -278,14 +278,15 @@ class TraditionalMultiproofWithHuffmanBuilder:
         )
         
         return proof, proof_flags
-    
-    def add_learning_event(self, verified_properties, learning_mode=None):
+
+    def add_learning_event(self, verified_properties, learning_mode=None, end_of_day=False):
         """
         Add verification event with unified learning support.
         
         Args:
             verified_properties: List of property IDs that were verified
             learning_mode: Override learning mode (optional, uses config if None)
+            end_of_day: Boolean indicating if this is the end of day event
         """
         try:
             # Always get the config for settings like verbose_logging, batch_size, etc.
@@ -321,9 +322,9 @@ class TraditionalMultiproofWithHuffmanBuilder:
                 if should_rebuild and config.verbose_logging:
                     print(f"📚 Batch learning triggered (every {config.batch_size} verifications)")
             elif effective_mode == LearningMode.DAILY:
-                should_rebuild = False  # Rebuild only at end of day
-                if config.verbose_logging:
-                    print(f"📚 Daily learning mode - no immediate rebuild")
+                should_rebuild = end_of_day  # Rebuild only at end of day
+                if should_rebuild and config.verbose_logging:
+                    print(f"📚 Daily learning triggered (end of day)")
             elif effective_mode == LearningMode.HYBRID:
                 # Use immediate learning for simple events, batch for complex ones
                 if len(verified_properties) < config.immediate_threshold:
@@ -360,9 +361,9 @@ class TraditionalMultiproofWithHuffmanBuilder:
             self.build()
             return True, self.merkle_root
 
-    def add_verification_event(self, verified_properties, learning_mode=None):
-        """Add new verification event to compressed traffic logs (backward compatibility)."""
-        return self.add_learning_event(verified_properties, learning_mode)
+    def add_verification_event(self, verified_properties, learning_mode=None, end_of_day=False):
+        """Add new verification event to compressed traffic logs."""
+        return self.add_learning_event(verified_properties, learning_mode, end_of_day=end_of_day)
     
     def _estimate_average_proof_size(self):
         """Estimate average proof size based on tree depth and common patterns."""

@@ -172,7 +172,7 @@ class ProvinceTreeBuilder:
         
         return proof, flags, leaves_to_prove_hex_sorted
     
-    def add_learning_event(self, verified_properties, day_idx=None, learning_mode=None):
+    def add_learning_event(self, verified_properties, end_of_day=False, learning_mode=None):
         """
         Add verification event with unified learning support (delegates to underlying tree builder).
         
@@ -186,12 +186,13 @@ class ProvinceTreeBuilder:
         province_properties = [prop for prop in verified_properties if prop.startswith(province_prefix)]
         
         if province_properties:
-            return self.tree_builder.add_learning_event(province_properties, learning_mode=learning_mode)
+            return self.tree_builder.add_verification_event(province_properties, learning_mode, end_of_day)
         return False, None
 
-    def add_verification_event(self, verified_properties, learning_mode=None):
+    def add_verification_event(self, verified_properties, learning_mode=None, end_of_day=False):
         """Add new verification event (backward compatibility)."""
-        return self.add_learning_event(verified_properties, learning_mode)
+        print(f"EOD: {end_of_day}")
+        return self.add_learning_event(verified_properties, end_of_day, learning_mode)
     
     def get_compression_stats(self):
         """Get compression statistics from underlying tree builder."""
