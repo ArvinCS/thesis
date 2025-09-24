@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+/**
+ * @title StatelessHierarchicalVerifier
+ * @author Your Name
+ * @notice This contract implements a stateless hierarchical batch verification system.
+ * 
+ * The system uses a two-level hierarchy:
+ * 1. Province Trees: Each province has its own Merkle tree of property documents
+ * 2. Jurisdiction Tree: A top-level tree where each leaf is a province root
+ * 
+ * Only the jurisdiction root is stored on-chain. Province roots are provided
+ * as part of the verification data, making the system stateless and more efficient.
+ */
+contract StatelessHierarchicalVerifier is Ownable {
+    // The single, authoritative Jurisdiction Tree root stored on-chain
+    bytes32 public jurisdictionRoot;
+    
+    // Events
+    event JurisdictionRootUpdated(bytes32 indexed newRoot, uint256 timestamp);
+    event HierarchicalBatchVerified(
+        uint256 indexed totalDocuments,
+        uint256 indexed provincesInvolved,
+        bytes32 indexed jurisdictionRoot
+    );
+    
+    /**
+     * @notice Constructor to set the initial owner of the contract.
+     * @param initialOwner The address of the account that will have administrative privileges.
+     */
+    constructor(address initialOwner) {
+        _transferOwnership(initialOwner);
+    }
+    
+    /**
+     * @notice Updates the jurisdiction root.
+     * @param _newJurisdictionRoot The new jurisdiction tree root
+     */
+    function updateJurisdictionRoot(bytes32 _newJurisdictionRoot) external onlyOwner {
+        require(_newJurisdictionRoot != bytes32(0), "Jurisdiction root cannot be empty");
+        jurisdictionRoot = _newJurisdictionRoot;
+        emit JurisdictionRootUpdated(_newJurisdictionRoot, block.timestamp);
+    }
+    
+    /**
+     * @notice Verifies a batch of documents across multiple provinces in a single transaction.
+     * 
+     * This function implements the stateless hierarchical verification:
+     * 1. First verifies that the claimed province roots are part of the jurisdiction root
+     * 2. Then verifies that the documents are part of their respective province roots
+     * 
+     * @param claimedProvinceRoots Array of province roots being verified
+     * @param jurisdictionProof Merkle proof for the province roots against jurisdiction root
+     * @param jurisdictionFlags Flags for the jurisdiction proof
+     * @param provinceProofs Nested array of proofs for documents against their province roots
+     * @param provinceFlags Nested array of flags for the province proofs
+     * @param provinceLeavesArrays Nested array of document hashes being verified
+     * @return success True if all verifications pass
+     */
+    function verifyHierarchicalBatch(
+        bytes32[] calldata claimedProvinceRoots,
+        bytes32[] calldata jurisdictionProof,
+        bool[] calldata jurisdictionFlags,
+        bytes32[][] calldata provinceProofs,
+        bool[][] calldata provinceFlags,
+        bytes32[][] calldata provinceLeavesArrays
+    ) external returns (bool success) {
+        require(claimedProvinceRoots.length > 0, "No province roots provided");
+        require(claimedProvinceRoots.length == provinceProofs.length, "Mismatch in province data arrays");
+        require(claimedProvinceRoots.length == provinceFlags.length, "Mismatch in province data arrays");
+        require(claimedProvinceRoots.length == provinceLeavesArrays.length, "Mismatch in province data arrays");
+        
+        // Step 1: Verify that the claimed province roots are part of the jurisdiction root
+        bool jurisdictionVerification = MerkleProof.multiProofVerify(
+            jurisdictionProof,
+            jurisdictionFlags,
+            jurisdictionRoot,
+            claimedProvinceRoots
+        );
+        
+        require(jurisdictionVerification, "Jurisdiction verification failed");
+        
+        // Step 2: Verify that the documents are part of their respective province roots
+        for (uint256 i = 0; i < claimedProvinceRoots.length; i++) {
+            require(provinceLeavesArrays[i].length > 0, "No documents provided for province");
+            
+            bool provinceVerification = MerkleProof.multiProofVerify(
+                provinceProofs[i],
+                provinceFlags[i],
+                claimedProvinceRoots[i],
+                provinceLeavesArrays[i]
+            );
+            
+            require(provinceVerification, "Province verification failed");
+        }
+        
+        // Calculate total documents verified
+        uint256 totalDocuments = 0;
+        for (uint256 i = 0; i < provinceLeavesArrays.length; i++) {
+            totalDocuments += provinceLeavesArrays[i].length;
+        }
+        
+        emit HierarchicalBatchVerified(
+            totalDocuments,
+            claimedProvinceRoots.length,
+            jurisdictionRoot
+        );
+        
+        return true;
+    }
+    
+    /**
+     * @notice Verifies a single province's documents against its root.
+     * This is a helper function for single-province verification.
+     * 
+     * @param provinceRoot The root of the province's Merkle tree
+     * @param proof Merkle proof for the documents against the province root
+     * @param flags Flags for the proof
+     * @param leaves Array of document hashes being verified
+     * @return success True if verification passes
+     */
+    function verifyProvinceDocuments(
+        bytes32 provinceRoot,
+        bytes32[] calldata proof,
+        bool[] calldata flags,
+        bytes32[] calldata leaves
+    ) external pure returns (bool success) {
+        require(leaves.length > 0, "No documents provided");
+        
+        return MerkleProof.multiProofVerify(
+            proof,
+            flags,
+            provinceRoot,
+            leaves
+        );
+    }
+    
+    /**
+     * @notice Verifies that a set of province roots are part of the jurisdiction root.
+     * This is a helper function for jurisdiction-level verification.
+     * 
+     * @param provinceRoots Array of province roots to verify
+     * @param proof Merkle proof for the province roots against jurisdiction root
+     * @param flags Flags for the proof
+     * @return success True if verification passes
+     */
+    function verifyProvinceRoots(
+        bytes32[] calldata provinceRoots,
+        bytes32[] calldata proof,
+        bool[] calldata flags
+    ) external view returns (bool success) {
+        require(provinceRoots.length > 0, "No province roots provided");
+        
+        return MerkleProof.multiProofVerify(
+            proof,
+            flags,
+            jurisdictionRoot,
+            provinceRoots
+        );
+    }
+    
+    /**
+     * @notice Gets the current jurisdiction root.
+     * @return The current jurisdiction root
+     */
+    function getJurisdictionRoot() external view returns (bytes32) {
+        return jurisdictionRoot;
+    }
+}
