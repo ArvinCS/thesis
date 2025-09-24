@@ -14,6 +14,7 @@ Key Features:
 5. Scalable testing across different document counts and time periods
 """
 
+import concurrent
 import json
 import time
 import random
@@ -243,10 +244,10 @@ class MultiDayTrafficSimulator:
     def _choose_event_type(self):
         """Choose event type based on realistic probabilities."""
         event_types = {
-            'single_property': 0.4,      # 40% single property verifications
-            'property_portfolio': 0.35,   # 35% related property verifications
-            'cross_province_audit': 0.15, # 15% cross-province audits
-            'bulk_verification': 0.1     # 10% large bulk verifications
+            'single_property': 1.0,      # 40% single property verifications
+            'property_portfolio': 0,   # 35% related property verifications
+            'cross_province_audit': 0, # 15% cross-province audits
+            'bulk_verification': 0     # 10% large bulk verifications
         }
         
         rand = random.random()
@@ -299,12 +300,13 @@ class MultiDayVerificationSuite:
     - Optimization effectiveness
     """
     
-    def __init__(self, web3_instance=None, reports_dir=None):
+    def __init__(self, web3_instance=None, reports_dir=None, enable_multithreading=False):
         self.web3 = web3_instance
         self.performance_data = {}
         self.gas_analysis = {}
         self.reports_dir = reports_dir
-        
+        self.enable_multithreading = enable_multithreading
+
         # Setup contracts if Web3 available
         if self.web3:
             self._setup_contracts()
@@ -665,10 +667,8 @@ class MultiDayVerificationSuite:
         for day_idx, day_traffic in enumerate(daily_traffic):
             print(f"\nTesting Day {day_idx + 1} ({len(day_traffic)} events)...")
             
-            day_results = self._test_single_day(
-                tree_systems, day_traffic, day_idx, daily_stats.get(day_idx, {})
-            )
-            
+            day_results = self._test_single_day(tree_systems, day_traffic, day_idx, daily_stats.get(day_idx, {}))
+
             all_results.extend(day_results)
             
             # End of day: trigger daily learning for Huffman-optimized approaches
@@ -694,20 +694,44 @@ class MultiDayVerificationSuite:
                 continue
             
             # Test each approach
-            for approach_name, system in tree_systems.items():
-                try:
-                    result = self._test_single_verification_event(
-                        approach_name, system, event, day_idx, event_idx, end_of_day=(event_idx == len(test_events)-1)
-                    )
-                    results.append(result)
-                except Exception as e:
-                    print(f"    Error testing {approach_name}: {e}")
-                    results.append({
-                        'approach': approach_name,
-                        'day': day_idx,
-                        'event': event_idx,
-                        'error': str(e)
-                    })
+            if self.enable_multithreading:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(tree_systems)) as executor:
+                    future_to_approach = {
+                        executor.submit(
+                            self._test_single_verification_event,
+                            approach_name, system, event, day_idx, event_idx, end_of_day=(event_idx == len(test_events)-1)
+                        ): approach_name
+                        for approach_name, system in tree_systems.items()
+                    }
+                    
+                    for future in concurrent.futures.as_completed(future_to_approach):
+                        approach_name = future_to_approach[future]
+                        try:
+                            result = future.result()
+                            results.append(result)
+                        except Exception as e:
+                            print(f"    Error testing {approach_name}: {e}")
+                            results.append({
+                                'approach': approach_name,
+                                'day': day_idx,
+                                'event': event_idx,
+                                'error': str(e)
+                            })
+            else:
+                for approach_name, system in tree_systems.items():
+                    try:
+                        result = self._test_single_verification_event(
+                            approach_name, system, event, day_idx, event_idx, end_of_day=(event_idx == len(test_events)-1)
+                        )
+                        results.append(result)
+                    except Exception as e:
+                        print(f"    Error testing {approach_name}: {e}")
+                        results.append({
+                            'approach': approach_name,
+                            'day': day_idx,
+                            'event': event_idx,
+                            'error': str(e)
+                        })
         
         return results
     
@@ -1597,36 +1621,83 @@ class MultiDayVerificationSuite:
         
         # Test all 4+ province events
         for event_idx, event in cross_province_4plus_events:
-            for approach_name, system in tree_systems.items():
-                try:
-                    result = self._test_cross_province_verification_event(
-                        approach_name, system, event, event_idx, True, end_of_day=(event_idx == len(cross_province_4plus_events)-1)
-                    )
-                    results.append(result)
-                except Exception as e:
-                    print(f"    Error testing {approach_name} on event {event_idx}: {e}")
-                    results.append({
-                        'approach': approach_name,
-                        'event': event_idx,
-                        'is_4plus_province': True,
-                        'error': str(e)
-                    })
+            if self.enable_multithreading:
+                # Multithreaded execution
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(tree_systems)) as executor:
+                    future_to_approach = {
+                        executor.submit(
+                            self._test_cross_province_verification_event,
+                            approach_name, system, event, event_idx, True, end_of_day=(event_idx == len(cross_province_4plus_events)-1)
+                        ): approach_name
+                        for approach_name, system in tree_systems.items()
+                    }
+                    for future in concurrent.futures.as_completed(future_to_approach):
+                        approach_name = future_to_approach[future]
+                        try:
+                            result = future.result()
+                            results.append(result)
+                        except Exception as e:
+                            print(f"    Error testing {approach_name} on event {event_idx}: {e}")
+                            results.append({
+                                'approach': approach_name,
+                                'event': event_idx,
+                                'is_4plus_province': True,
+                                'error': str(e)
+                            })
+            else:
+                for approach_name, system in tree_systems.items():
+                    try:
+                        result = self._test_cross_province_verification_event(
+                            approach_name, system, event, event_idx, True, end_of_day=(event_idx == len(cross_province_4plus_events)-1)
+                        )
+                        results.append(result)
+                    except Exception as e:
+                        print(f"    Error testing {approach_name} on event {event_idx}: {e}")
+                        results.append({
+                            'approach': approach_name,
+                            'event': event_idx,
+                            'is_4plus_province': True,
+                            'error': str(e)
+                        })
         
         # Test sample of other events for comparison
         for event_idx, event in other_events:
-            for approach_name, system in tree_systems.items():
-                try:
-                    result = self._test_cross_province_verification_event(
-                        approach_name, system, event, event_idx, False, end_of_day=(event_idx == len(other_events)-1)
-                    )
-                    results.append(result)
-                except Exception as e:
-                    results.append({
-                        'approach': approach_name,
-                        'event': event_idx,
-                        'is_4plus_province': False,
-                        'error': str(e)
-                    })
+            if self.enable_multithreading:
+                # Multithreaded execution
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(tree_systems)) as executor:
+                    future_to_approach = {
+                        executor.submit(
+                            self._test_cross_province_verification_event,
+                            approach_name, system, event, event_idx, False, end_of_day=(event_idx == len(other_events)-1)
+                        ): approach_name
+                        for approach_name, system in tree_systems.items()
+                    }
+                    for future in concurrent.futures.as_completed(future_to_approach):
+                        approach_name = future_to_approach[future]
+                        try:
+                            result = future.result()
+                            results.append(result)
+                        except Exception as e:
+                            results.append({
+                                'approach': approach_name,
+                                'event': event_idx,
+                                'is_4plus_province': False,
+                                'error': str(e)
+                            })
+            else:
+                for approach_name, system in tree_systems.items():
+                    try:
+                        result = self._test_cross_province_verification_event(
+                            approach_name, system, event, event_idx, False, end_of_day=(event_idx == len(other_events)-1)
+                        )
+                        results.append(result)
+                    except Exception as e:
+                        results.append({
+                            'approach': approach_name,
+                            'event': event_idx,
+                            'is_4plus_province': False,
+                            'error': str(e)
+                        })
         
         return results
 

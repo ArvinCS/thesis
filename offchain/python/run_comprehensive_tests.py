@@ -229,7 +229,7 @@ class ComprehensiveTestRunner:
             if not self.web3:
                 raise Exception("Web3 connection required for on-chain multi-day verification")
             
-            multi_day_suite = MultiDayVerificationSuite(self.web3, reports_dir=self.reports_dir)
+            multi_day_suite = MultiDayVerificationSuite(self.web3, reports_dir=self.reports_dir, enable_multithreading=config.get('enable_multithreading', False))
             
             # Check for sparse verification settings
             sparse_verification = config.get('sparse_verification', False)
@@ -410,6 +410,8 @@ def main():
     parser.add_argument('--traffic-events', type=int, help='Number of traffic events')
     parser.add_argument('--skip-blockchain', action='store_true', 
                        help='Skip blockchain connection')
+    parser.add_argument('--enable-multithread', action='store_true', 
+                       help='Enable multithreading for testing (if supported)')
     parser.add_argument('--gas-price', type=int, default=20, 
                        help='Gas price in gwei for cost analysis')
     parser.add_argument('--approaches', nargs='*', 
@@ -481,6 +483,8 @@ def main():
         custom_config['documents'] = args.documents
     if args.traffic_events:
         custom_config['traffic_events'] = args.traffic_events
+    if args.enable_multithread:
+        custom_config['enable_multithreading'] = True
     
     # Run tests based on type
     try:

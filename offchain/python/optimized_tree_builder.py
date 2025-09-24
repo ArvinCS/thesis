@@ -499,15 +499,11 @@ class HierarchicalTreeBuilder:
                 should_rebuild = False
                 if config.verbose_logging:
                     print(f"📚 Learning disabled - no rebuild")
-            print("YYY")
+            
             if should_rebuild:
-                print("ZZZ")
                 old_root = self.merkle_root
-                print("AAA")
                 old_leaf_order = self.ordered_leaves_hex.copy() if self.ordered_leaves_hex else []
-                print("DDD")
                 self.build()
-                print("EEE")
                 if config.verbose_logging:
                     print(f"✅ Tree rebuilt after verification #{self.verification_count}")
                 if old_root != self.merkle_root and config.verbose_logging:
@@ -527,7 +523,6 @@ class HierarchicalTreeBuilder:
 
     def add_verification_event(self, verified_properties, learning_mode=None, end_of_day=False):
         """Add new verification event to compressed traffic logs (backward compatibility)."""
-        print(f"EOD: {end_of_day}")
         return self.add_learning_event(verified_properties, learning_mode, end_of_day)
 
     def get_compression_stats(self):
