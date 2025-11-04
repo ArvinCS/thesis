@@ -55,3 +55,4 @@ __pycache__/
 ignition/deployments/chain-31337
 offchain/python/reports
 docs*.zip
+test_reports/

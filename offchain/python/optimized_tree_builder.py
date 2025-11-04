@@ -1,22 +1,9 @@
 import heapq
 from collections import defaultdict
 from eth_utils import keccak
+from basic_data_structure import Document
 
 # --- DATA STRUCTURES ---
-
-class Document:
-    def __init__(self, doc_id, content, province, property_id):
-        self.doc_id = doc_id
-        self.content = content
-        self.province = province
-        self.property_id = property_id
-        # Create hierarchical identifier: Province.Property
-        self.full_id = f"{province}.{property_id}"
-        self.hash_hex = keccak(self.content.encode('utf-8')).hex()
-
-    def __repr__(self):
-        return f"Doc({self.doc_id}, {self.full_id})"
-
 class PropertyCluster:
     def __init__(self, property_id):
         self.property_id = property_id

@@ -1,0 +1,162 @@
+import random
+import uuid
+from typing import Final
+from basic_data_structure import Document, Property
+
+class SeedGenerator:
+    """
+    Generates a realistic dataset of Indonesian properties for benchmarking.
+
+    This version is refined to use the specific Document class from
+    basic_data_structure.py, which includes content hashing.
+    """
+
+    # SOURCE: Badan Pusat Statistik (BPS) Indonesia, 2023.
+    # Data represents the number of households (in thousands) per province.
+    _PROVINCE_DISTRIBUTION_RAW: Final[dict[str, int]] = {
+        "JAWA BARAT": 13533,
+        "JAWA TIMUR": 11538,
+        "JAWA TENGAH": 10217,
+        "SUMATERA UTARA": 4149,
+        "BANTEN": 3614,
+        "DKI JAKARTA": 2999,
+        "SULAWESI SELATAN": 2577,
+        "LAMPUNG": 2542,
+        "SUMATERA SELATAN": 2484,
+        "RIAU": 1969,
+        "SUMATERA BARAT": 1600,
+        "KALIMANTAN BARAT": 1599,
+        "NUSA TENGGARA TIMUR": 1478,
+        "NUSA TENGGARA BARAT": 1475,
+        "KALIMANTAN SELATAN": 1282,
+        "ACEH": 1261,
+        "JAMBI": 1076,
+        "KALIMANTAN TIMUR": 1069,
+        # The rest of the provinces...
+        "SULAWESI TENGAH": 844,
+        "KEPULAUAN RIAU": 688,
+        "SULAWESI TENGGARA": 751,
+        "KALIMANTAN TENGAH": 790,
+        "PAPUA": 732,
+        "BENGKULU": 591,
+        "DI YOGYAKARTA": 1133,
+        "MALUKU": 487,
+        "SULAWESI UTARA": 757,
+        "BALI": 1242,
+        "BANGKA BELITUNG": 427,
+        "GORONTALO": 349,
+        "MALUKU UTARA": 346,
+        "SULAWESI BARAT": 401,
+        "PAPUA BARAT": 283,
+        "KALIMANTAN UTARA": 204,
+        "PAPUA SELATAN": 140,
+        "PAPUA TENGAH": 312,
+        "PAPUA PEGUNUNGAN": 321,
+        "PAPUA BARAT DAYA": 160,
+    }
+
+    # Define the types of documents a property might have.
+    _DOCUMENT_TYPES: Final[dict[str, float]] = {
+        "TitleDeed": 1.0,  # Sertifikat Hak Milik (Always exists)
+        "BuildingPermit": 0.8, # Izin Mendirikan Bangunan (IMB)
+        "LandAndBuildingTax2025": 0.95, # PBB-P2
+        "LandAndBuildingTax2024": 0.98, # PBB-P2
+        "ElectricityBill_Latest": 0.9,
+        "WaterBill_Latest": 0.75,
+    }
+
+    def __init__(self, total_properties: int):
+        self.total_properties = total_properties
+        total_households = sum(self._PROVINCE_DISTRIBUTION_RAW.values())
+        self.province_weights = {
+            p: c / total_households for p, c in self._PROVINCE_DISTRIBUTION_RAW.items()
+        }
+
+    def _create_random_documents(self, province: str, property_id: str) -> list[Document]:
+        """
+        Generates a list of Document objects for a single property.
+        
+        Args:
+            province: The province of the parent property.
+            property_id: The ID of the parent property.
+
+        Returns:
+            A list of fully instantiated Document objects.
+        """
+        documents = []
+        for doc_type, probability in self._DOCUMENT_TYPES.items():
+            if random.random() < probability:
+                doc_id = f"doc_{doc_type}_{uuid.uuid4().hex[:10]}"
+                
+                # Generate unique, placeholder content for hashing
+                content = (
+                    f"This is the official content for document '{doc_id}' of type '{doc_type}' "
+                    f"for property '{property_id}' in {province}. "
+                    f"Generated on {__import__('datetime').datetime.now().isoformat()}."
+                )
+                
+                # Instantiate YOUR Document class
+                new_doc = Document(
+                    doc_id=doc_id,
+                    content=content,
+                    doc_type=doc_type,
+                    province=province,
+                    property_id=property_id
+                )
+                documents.append(new_doc)
+        return documents
+
+    def _create_random_property(self, province: str) -> Property:
+        """Creates a single, randomized Property object for a given province."""
+        prop_id = f"prop_{province.replace(' ', '_')}_{uuid.uuid4().hex[:10]}"
+        
+        # Pass the necessary IDs down to the document creation method
+        documents = self._create_random_documents(province=province, property_id=prop_id)
+        
+        return Property(property_id=prop_id, province=province, documents=documents)
+
+    def generate_dataset(self) -> list[Property]:
+        """
+        Generates the full dataset of properties based on provincial distribution.
+        """
+        print(f"Generating a dataset of {self.total_properties} properties...")
+        dataset = []
+        
+        provinces = list(self.province_weights.keys())
+        weights = list(self.province_weights.values())
+        
+        generated_provinces = random.choices(provinces, weights=weights, k=self.total_properties)
+        
+        property_counts = {p: 0 for p in provinces}
+        for province_name in generated_provinces:
+            dataset.append(self._create_random_property(province=province_name))
+            property_counts[province_name] += 1
+        
+        print("Dataset generation complete.")
+        print("\n--- Top 5 Provinces in Generated Dataset ---")
+        sorted_counts = sorted(property_counts.items(), key=lambda item: item[1], reverse=True)
+        for province, count in sorted_counts[:5]:
+            percentage = (count / self.total_properties) * 100
+            print(f"  - {province:<20}: {count:>5} properties ({percentage:.2f}%)")
+            
+        return dataset
+
+# --- Step 4: Example Usage ---
+
+if __name__ == "__main__":
+    TOTAL_PROPERTIES_TO_GENERATE = 1000  # Smaller number for a quick demo
+
+    seed_generator = SeedGenerator(total_properties=TOTAL_PROPERTIES_TO_GENERATE)
+    property_dataset = seed_generator.generate_dataset()
+
+    print(f"\nTotal properties in final dataset: {len(property_dataset)}")
+    if property_dataset:
+        print("\n--- Example Property ---")
+        example_prop = random.choice(property_dataset)
+        print(f"  Property ID: {example_prop.property_id}")
+        print(f"  Province:    {example_prop.province}")
+        print("  Documents:")
+        for doc in example_prop.documents:
+            # The __repr__ comes from your Document class
+            print(f"    - {doc}")
+            print(f"      Hash: {doc.hash_hex}")
