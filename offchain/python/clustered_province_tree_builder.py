@@ -73,7 +73,7 @@ class ClusteredProvinceTreeBuilder:
         self.tree_layers = []
         
         # Accept access patterns for optimization
-        from access_patterns import AuditPattern, TransactionalPattern
+        from access_patterns_enhanced import AuditPattern, TransactionalPattern
         if audit_pattern is not None and not isinstance(audit_pattern, AuditPattern):
             raise ValueError("Only AuditPattern instances are accepted for audit_pattern.")
         if transactional_pattern is not None and not isinstance(transactional_pattern, TransactionalPattern):
@@ -157,6 +157,33 @@ class ClusteredProvinceTreeBuilder:
         
         return pq[0] if pq else None
 
+    def _build_balanced_subtree_hash(self, hashes: List[str]) -> str:
+        """Build a balanced Merkle subtree from a list of hex hashes and return the root hash.
+
+        This constructs a standard balanced binary Merkle tree (pad with last element
+        when a level has an odd number of nodes).
+        """
+        if not hashes:
+            return keccak(b'').hex()
+
+        current = list(hashes)
+        # If only one hash, return it directly
+        if len(current) == 1:
+            return current[0]
+
+        while len(current) > 1:
+            if len(current) % 2 != 0:
+                current.append(current[-1])
+
+            next_level = []
+            for i in range(0, len(current), 2):
+                parent = combine_and_hash(current[i], current[i + 1])
+                next_level.append(parent)
+
+            current = next_level
+
+        return current[0]
+
     def _generate_huffman_codes(self, root_node):
         """Generate Huffman codes from the tree using iterative approach."""
         codes = {}
@@ -183,11 +210,13 @@ class ClusteredProvinceTreeBuilder:
     
     def _optimize_province_ordering(self, province, property_clusters, property_freq, pair_freq, alpha_threshold=0.12):
         """
-        Apply true pairs-first Huffman optimization within a province with alpha threshold.
-        This creates an unbalanced tree optimized for shallow depth on frequent pairs.
-        
-        Args:
-            alpha_threshold: Minimum relative frequency for property pair merging (default 0.12 = 12%)
+        Optimize ordering within a province using a simple frequency-based ordering.
+
+        This ordinary clustered-province builder does not perform pairs-first Huffman
+        merging. Instead, properties inside a province are ordered by their
+        aggregate frequency (descending). Keeping this implementation simple
+        avoids the O(n^2) pair-processing cost and matches the ordinary
+        clustered province tree behavior.
         """
         if not property_clusters:
             return []
@@ -201,17 +230,16 @@ class ClusteredProvinceTreeBuilder:
                 province_pairs[(prop1, prop2)] = freq
         
         # Calculate alpha threshold based on maximum pair frequency in this province
-        if province_pairs:
-            max_pair_freq = max(province_pairs.values())
-            min_pair_freq_threshold = max_pair_freq * alpha_threshold
-            print(f"    Province {province}: Alpha threshold {alpha_threshold} -> Min pair frequency: {min_pair_freq_threshold:.1f}")
-        else:
-            min_pair_freq_threshold = 0
-        
-        # Apply pairs-first Huffman optimization with alpha threshold
-        return self._apply_pairs_first_huffman_to_clusters(
-            property_clusters, property_freq, province_pairs, min_pair_freq_threshold, province
+        # For the ordinary clustered province tree we simply sort properties by
+        # their frequency. Use frequency from property_freq (defaults to 0).
+        sorted_clusters = sorted(
+            property_clusters,
+            key=lambda c: property_freq.get(c.property_id, 0),
+            reverse=True
         )
+
+        print(f"    Province {province}: Ordering {len(sorted_clusters)} properties by frequency")
+        return sorted_clusters
     
     def _apply_pairs_first_huffman_to_clusters(self, clusters, cluster_freq, pair_freq, min_pair_freq_threshold, province):
         """
@@ -318,73 +346,68 @@ class ClusteredProvinceTreeBuilder:
         """
         Build the clustered province tree with two-level optimization:
         1. Primary: Group by province
-        2. Secondary: Optimize within province using pairs-first Huffman
+        2. Secondary: Each province builds an ordinary balanced Merkle tree from its documents
+           (no pairs-first Huffman merging in this ordinary clustered province builder)
         """
         print("Building Clustered Province Tree with two-level optimization...")
-        
-        # Calculate frequencies for optimization
+        # For the ordinary clustered province builder we avoid pairwise merging.
+        # Instead, for each province we build a balanced Merkle subtree from that
+        # province's documents. Then we compute a top-level balanced Merkle tree
+        # over the province roots.
+
+        # Calculate frequencies (still useful for stats) but we will not use pair merging
         province_freq, property_freq, pair_freq = self._calculate_frequencies()
-        
+
         # Primary sorting: Group by province (alphabetical order for consistency)
         sorted_provinces = sorted(self.province_clusters.keys())
-        
-        final_ordered_clusters = []
-        
+
+        # Store province-level roots and leaves for downstream use
+        self.province_roots = []
+        self.province_leaves = {}
+
         for province in sorted_provinces:
             property_clusters = list(self.province_clusters[province].values())
-            
-            print(f"  Optimizing {province}: {len(property_clusters)} properties")
-            
-            # Secondary sorting: Apply pairs-first Huffman within province with alpha threshold
-            alpha_threshold = 0.3  # 12% threshold for property pair merging
-            optimized_clusters = self._optimize_province_ordering(
-                province, property_clusters, property_freq, pair_freq, alpha_threshold
-            )
-            
-            final_ordered_clusters.extend(optimized_clusters)
+            # Flatten documents for this province in deterministic order: sort by property id then doc id
+            doc_hashes = []
+            for cluster in sorted(property_clusters, key=lambda c: c.property_id):
+                # Sort documents within property deterministically by doc_id
+                sorted_docs = sorted(cluster.documents, key=lambda d: d.doc_id)
+                for d in sorted_docs:
+                    doc_hashes.append(d.hash_hex)
+
+            print(f"  Building balanced subtree for province {province}: {len(doc_hashes)} documents")
+            province_root = self._build_balanced_subtree_hash(doc_hashes)
+            self.province_roots.append(province_root)
+            self.province_leaves[province] = doc_hashes
         
-        # Extract ordered leaves from optimized clusters
-        self.ordered_leaves_hex = []
-        for cluster in final_ordered_clusters:
-            self.ordered_leaves_hex.extend(cluster.get_leaf_hashes_hex())
-        
-        # Remove duplicates while preserving order
-        unique_leaves = []
-        seen = set()
-        for leaf in self.ordered_leaves_hex:
-            if leaf not in seen:
-                unique_leaves.append(leaf)
-                seen.add(leaf)
-        
-        self.ordered_leaves_hex = unique_leaves
-        
-        if not self.ordered_leaves_hex:
+        # Build top-level balanced Merkle tree from province roots
+        if not self.province_roots:
             self.merkle_root = keccak(b'').hex()
             return self.merkle_root
-        
-        print(f"  Total unique leaves: {len(self.ordered_leaves_hex)}")
-        
-        # Build flat Merkle tree bottom-up
+
+        # Set ordered_leaves_hex at the top-level to province roots (hierarchical tree)
+        self.ordered_leaves_hex = list(self.province_roots)
+
+        # Build tree layers for the top-level (provinces)
         self.tree_layers = []
         current_layer = list(self.ordered_leaves_hex)
         self.tree_layers.append(current_layer)
-        
+
         while len(current_layer) > 1:
-            # Pad with last element if odd number
             if len(current_layer) % 2 != 0:
                 current_layer.append(current_layer[-1])
-            
-            next_layer = []
+
+            next_level = []
             for i in range(0, len(current_layer), 2):
                 parent_hash = combine_and_hash(current_layer[i], current_layer[i + 1])
-                next_layer.append(parent_hash)
-            
-            self.tree_layers.append(next_layer)
-            current_layer = next_layer
-        
+                next_level.append(parent_hash)
+
+            self.tree_layers.append(next_level)
+            current_layer = next_level
+
         self.merkle_root = current_layer[0] if current_layer else keccak(b'').hex()
-        
-        print(f"  Clustered Province Tree Root: {self.merkle_root[:16]}...")
+
+        print(f"  Clustered Province Tree (hierarchical) Root: {self.merkle_root[:16]}...")
         return self.merkle_root
     
     def generate_multiproof(self, leaves_to_prove_hex):

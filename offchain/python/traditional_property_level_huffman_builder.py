@@ -114,20 +114,20 @@ class PropertyDocumentGroup:
         """Add a document to this property group."""
         self.documents.append(document)
     
-    def optimize_document_order(self, document_pair_frequencies, document_frequencies):
+    def optimize_document_order(self, document_pair_frequencies, document_frequencies, alpha_threshold=0.15):
         """Apply pairs-first Huffman optimization to documents within this property."""
         if len(self.documents) <= 1:
             self.optimized_document_order = self.documents.copy()
             return
         
-        # For very large property groups, use simple frequency-based ordering instead of expensive Huffman
-        if len(self.documents) > 0:  # Threshold for computational efficiency
-            self.optimized_document_order = sorted(
-                self.documents,
-                key=lambda doc: document_frequencies.get(f"{doc.province}.{doc.property_id}.{doc.doc_id}", 1),
-                reverse=True
-            )
-            return
+        # # For very large property groups, use simple frequency-based ordering instead of expensive Huffman
+        # if len(self.documents) > 0:  # Threshold for computational efficiency
+        #     self.optimized_document_order = sorted(
+        #         self.documents,
+        #         key=lambda doc: document_frequencies.get(f"{doc.province}.{doc.property_id}.{doc.doc_id}", 1),
+        #         reverse=True
+        #     )
+        #     return
         
         # Create document frequency map for this property's documents
         property_doc_freq = {}
@@ -147,9 +147,7 @@ class PropertyDocumentGroup:
                     property_pair_freq[(doc1, doc2)] = freq
                     property_pair_freq[(doc2, doc1)] = freq  # Add both directions
         
-        # Apply pairs-first optimization within this property with alpha threshold
-        # Alpha = 0.15 means only pairs with frequency >= 15% of max pair frequency are merged
-        alpha_threshold = 0.15  # Configurable threshold for strong pair detection
+        # Apply pairs-first optimization within this property with configurable alpha threshold
         self.optimized_document_order = self._apply_pairs_first_huffman(
             self.documents, property_doc_freq, property_pair_freq, alpha_threshold
         )
@@ -166,11 +164,25 @@ class PropertyDocumentGroup:
         if len(documents) <= 1:
             return documents
         
+        # Special handling for alpha = 0 to prevent computational explosion
+        if alpha_threshold <= 0:
+            print(f"      Alpha threshold: {alpha_threshold} -> Using simple frequency-based ordering (alpha=0 causes computational explosion)")
+            # Use simple frequency-based ordering instead of pairs-first Huffman
+            return sorted(documents, key=lambda doc: doc_frequencies.get(doc, 1), reverse=True)
+        
         # Calculate alpha threshold based on maximum pair frequency
         if pair_frequencies:
             max_pair_freq = max(pair_frequencies.values())
             min_pair_freq_threshold = max_pair_freq * alpha_threshold
-            print(f"      Alpha threshold: {alpha_threshold} -> Min pair frequency: {min_pair_freq_threshold:.1f}")
+            
+            # Warn if alpha threshold results in too many pairs being processed
+            total_pairs = len(pair_frequencies)
+            strong_pairs_estimate = sum(1 for freq in pair_frequencies.values() if freq >= min_pair_freq_threshold)
+            if strong_pairs_estimate > 10000:  # More than 10K pairs
+                print(f"      ⚠️ Alpha threshold: {alpha_threshold} -> Min pair frequency: {min_pair_freq_threshold:.1f}")
+                print(f"      ⚠️ Warning: {strong_pairs_estimate:,}/{total_pairs:,} pairs will be processed (may be slow)")
+            else:
+                print(f"      Alpha threshold: {alpha_threshold} -> Min pair frequency: {min_pair_freq_threshold:.1f}")
         else:
             min_pair_freq_threshold = 0
         
@@ -295,14 +307,14 @@ class TraditionalPropertyLevelHuffmanBuilder:
     without geographical province clustering.
     """
     
-    def __init__(self, all_documents, audit_pattern=None, transactional_pattern=None):
+    def __init__(self, all_documents, audit_pattern=None, transactional_pattern=None, alpha_threshold=0.15):
         self.all_documents = all_documents
         self.merkle_root = None
         self.ordered_leaves_hex = []
         self.tree_layers = []
         
         # Accept access patterns for optimization
-        from access_patterns import AuditPattern, TransactionalPattern
+        from access_patterns_enhanced import AuditPattern, TransactionalPattern
         if audit_pattern is not None and not isinstance(audit_pattern, AuditPattern):
             raise ValueError("Only AuditPattern instances are accepted for audit_pattern.")
         if transactional_pattern is not None and not isinstance(transactional_pattern, TransactionalPattern):
@@ -310,6 +322,7 @@ class TraditionalPropertyLevelHuffmanBuilder:
         
         self.audit_pattern = audit_pattern
         self.transactional_pattern = transactional_pattern
+        self.alpha_threshold = alpha_threshold  # Configurable threshold for pairs-first Huffman
         self.verification_count = 0
         
         # Unbalanced tree structure
@@ -442,7 +455,7 @@ class TraditionalPropertyLevelHuffmanBuilder:
                 
                 # Apply document-level Huffman within property
                 if len(property_group.documents) > 1:
-                    property_group.optimize_document_order(document_pair_frequencies, document_frequencies)
+                    property_group.optimize_document_order(document_pair_frequencies, document_frequencies, self.alpha_threshold)
                 else:
                     property_group.optimized_document_order = property_group.documents
                 
@@ -516,8 +529,8 @@ class TraditionalPropertyLevelHuffmanBuilder:
             property_nodes.append(node)
             print(f"    Property {full_prop_id}: frequency {freq}, {len(prop_group.documents)} documents")
         
-        # Apply pairs-first Huffman with alpha threshold
-        alpha_threshold = 0.4
+        # Apply pairs-first Huffman with configurable alpha threshold
+        alpha_threshold = self.alpha_threshold
         if pair_freq:
             max_pair_freq = max(pair_freq.values())
             min_pair_freq_threshold = max_pair_freq * alpha_threshold

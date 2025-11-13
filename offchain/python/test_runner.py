@@ -26,6 +26,7 @@ class TestRunner:
     
     def __init__(self, web3_instance=None, reports_dir=None, enable_multithreading=False, verbose=False):
         self.web3 = web3_instance
+        self.alpha_overrides = None
         self.performance_data = {}
         self.gas_analysis = {}
         self.reports_dir = reports_dir
@@ -146,14 +147,28 @@ class TestRunner:
         if 'traditional_document_huffman' in selected_approaches:
             print("Building Traditional Document Huffman System...")
             traditional_document_huffman_start = time.time()
-            traditional_document_huffman_builder = TraditionalDocumentLevelHuffmanBuilder(documents, transactional_pattern)
+            # allow per-model alpha override
+            td_alpha = None
+            if hasattr(self, 'alpha_overrides') and self.alpha_overrides:
+                td_alpha = self.alpha_overrides.get('traditional_document_huffman')
+            if td_alpha is not None:
+                traditional_document_huffman_builder = TraditionalDocumentLevelHuffmanBuilder(documents, transactional_pattern, alpha_threshold=td_alpha)
+            else:
+                traditional_document_huffman_builder = TraditionalDocumentLevelHuffmanBuilder(documents, transactional_pattern)
             traditional_document_huffman_root = traditional_document_huffman_builder.build()
             traditional_document_huffman_build_time = time.time() - traditional_document_huffman_start
 
         if 'traditional_property_level_huffman' in selected_approaches:
             print("Building Traditional Property-Level Huffman System...")
             traditional_property_level_huffman_start = time.time()
-            traditional_property_level_huffman_builder = TraditionalPropertyLevelHuffmanBuilder(documents, audit_pattern, transactional_pattern)
+            # allow per-model alpha override
+            tpl_alpha = None
+            if hasattr(self, 'alpha_overrides') and self.alpha_overrides:
+                tpl_alpha = self.alpha_overrides.get('traditional_property_level_huffman')
+            if tpl_alpha is not None:
+                traditional_property_level_huffman_builder = TraditionalPropertyLevelHuffmanBuilder(documents, audit_pattern, transactional_pattern, alpha_threshold=tpl_alpha)
+            else:
+                traditional_property_level_huffman_builder = TraditionalPropertyLevelHuffmanBuilder(documents, audit_pattern, transactional_pattern)
             traditional_property_level_huffman_root = traditional_property_level_huffman_builder.build()
             traditional_property_level_huffman_build_time = time.time() - traditional_property_level_huffman_start
 
@@ -168,14 +183,28 @@ class TestRunner:
             print("Building Clustered Province + Document-Level Huffman System...")
             doc_huffman_start = time.time()
             # Import and use the new hybrid builder
-            clustered_province_with_document_huffman_builder = ClusteredProvinceWithDocumentHuffmanBuilder(documents, audit_pattern, transactional_pattern)
+            # allow per-model alpha override
+            cpdh_alpha = None
+            if hasattr(self, 'alpha_overrides') and self.alpha_overrides:
+                cpdh_alpha = self.alpha_overrides.get('clustered_province_with_document_huffman')
+            if cpdh_alpha is not None:
+                clustered_province_with_document_huffman_builder = ClusteredProvinceWithDocumentHuffmanBuilder(documents, audit_pattern, transactional_pattern, alpha_threshold=cpdh_alpha)
+            else:
+                clustered_province_with_document_huffman_builder = ClusteredProvinceWithDocumentHuffmanBuilder(documents, audit_pattern, transactional_pattern)
             clustered_province_with_document_huffman_root = clustered_province_with_document_huffman_builder.build()
             clustered_province_with_document_huffman_build_time = time.time() - doc_huffman_start
 
         if 'jurisdiction_tree' in selected_approaches:
             print("Building Jurisdiction Tree (Multi-Root Architecture)...")
             jurisdiction_start = time.time()
-            jurisdiction_tree_builder = JurisdictionTreeBuilder(documents, audit_pattern, transactional_pattern)
+            # allow per-model alpha override
+            jt_alpha = None
+            if hasattr(self, 'alpha_overrides') and self.alpha_overrides:
+                jt_alpha = self.alpha_overrides.get('jurisdiction_tree')
+            if jt_alpha is not None:
+                jurisdiction_tree_builder = JurisdictionTreeBuilder(documents, audit_pattern, transactional_pattern, alpha_threshold=jt_alpha)
+            else:
+                jurisdiction_tree_builder = JurisdictionTreeBuilder(documents, audit_pattern, transactional_pattern)
             jurisdiction_tree_root = jurisdiction_tree_builder.build()
             jurisdiction_tree_build_time = time.time() - jurisdiction_start
 
@@ -246,6 +275,72 @@ class TestRunner:
         
         return tree_systems
     
+    def _build_alpha_specific_tree_systems(self, documents, alpha_value: float, transactional_pattern, audit_pattern, selected_approaches: list[str]):
+        """Build tree systems with specific alpha value for hyperparameter tuning."""
+        tree_systems = {}
+        
+        if 'traditional_document_huffman' in selected_approaches:
+            print(f"Building Traditional Document Huffman System (α = {alpha_value})...")
+            start_time = time.time()
+            builder = TraditionalDocumentLevelHuffmanBuilder(documents, transactional_pattern, alpha_threshold=alpha_value)
+            root = builder.build()
+            build_time = time.time() - start_time
+            
+            tree_systems['traditional_document_huffman'] = {
+                'builder': builder,
+                'root': root,
+                'build_time': build_time,
+                'type': f'Traditional + Document-Level Huffman (α={alpha_value})',
+                'alpha': alpha_value
+            }
+
+        if 'traditional_property_level_huffman' in selected_approaches:
+            print(f"Building Traditional Property-Level Huffman System (α = {alpha_value})...")
+            start_time = time.time()
+            builder = TraditionalPropertyLevelHuffmanBuilder(documents, audit_pattern=audit_pattern, transactional_pattern=transactional_pattern, alpha_threshold=alpha_value)
+            root = builder.build()
+            build_time = time.time() - start_time
+            
+            tree_systems['traditional_property_level_huffman'] = {
+                'builder': builder,
+                'root': root,
+                'build_time': build_time,
+                'type': f'Traditional Property-Level Huffman (α={alpha_value})',
+                'alpha': alpha_value
+            }
+
+        if 'clustered_province_with_document_huffman' in selected_approaches:
+            print(f"Building Clustered Province + Document-Level Huffman System (α = {alpha_value})...")
+            start_time = time.time()
+            builder = ClusteredProvinceWithDocumentHuffmanBuilder(documents, audit_pattern=audit_pattern, transactional_pattern=transactional_pattern, alpha_threshold=alpha_value)
+            root = builder.build()
+            build_time = time.time() - start_time
+            
+            tree_systems['clustered_province_with_document_huffman'] = {
+                'builder': builder,
+                'root': root,
+                'build_time': build_time,
+                'type': f'Clustered Province + Document-Level Huffman (α={alpha_value})',
+                'alpha': alpha_value
+            }
+
+        if 'jurisdiction_tree' in selected_approaches:
+            print(f"Building Jurisdiction Tree System (α = {alpha_value})...")
+            start_time = time.time()
+            builder = JurisdictionTreeBuilder(documents, audit_pattern=audit_pattern, transactional_pattern=transactional_pattern, alpha_threshold=alpha_value)
+            root = builder.build()
+            build_time = time.time() - start_time
+            
+            tree_systems['jurisdiction_tree'] = {
+                'builder': builder,
+                'root': root,
+                'build_time': build_time,
+                'type': f'Jurisdiction Tree (Multi-Root) (α={alpha_value})',
+                'alpha': alpha_value
+            }
+        
+        return tree_systems
+    
     def run_tests(self, documents, tree_systems: dict, queries: list[Query], selected_approaches: list[str] = None):
         """
         Run the provided test suite and collect performance and gas cost data.
@@ -276,6 +371,75 @@ class TestRunner:
         print(f"\n🏁 All tests completed!")
         self._store_results(results)
         return results
+        
+    def run_alpha_tuning_tests(self, documents, queries: list[Query], alpha_values: list[float], transactional_pattern, audit_pattern, selected_approaches: list[str] = None):
+        """
+        Run alpha hyperparameter tuning tests for pairs-first Huffman models.
+        
+        Args:
+            documents: List of Document objects
+            queries: List of Query objects to execute
+            alpha_values: List of alpha values to test
+            transactional_pattern: TransactionalPattern for access patterns
+            audit_pattern: AuditPattern for access patterns
+            selected_approaches: List of approach names to test (only pairs-first Huffman models)
+        
+        Returns:
+            Dictionary containing tuning results for each approach and alpha value
+        """
+        # Filter to only pairs-first Huffman approaches
+        pairs_first_approaches = [
+            'traditional_document_huffman',
+            'traditional_property_level_huffman', 
+            'clustered_province_with_document_huffman',
+            'jurisdiction_tree'
+        ]
+        
+        if selected_approaches:
+            # Only keep approaches that are both selected and support pairs-first Huffman
+            tuning_approaches = [app for app in selected_approaches if app in pairs_first_approaches]
+        else:
+            tuning_approaches = pairs_first_approaches
+            
+        print(f"🎯 Running alpha hyperparameter tuning...")
+        print(f"   📊 Alpha values: {alpha_values}")
+        print(f"   🏗️ Approaches: {tuning_approaches}")
+        print(f"   🔍 Queries: {len(queries)}")
+        
+        tuning_results = {}
+        
+        for approach_name in tuning_approaches:
+            print(f"\n🔧 Tuning {approach_name}...")
+            approach_results = {}
+            
+            for alpha in alpha_values:
+                print(f"\n   📈 Testing α = {alpha}...")
+                
+                # Build tree systems with this specific alpha value
+                tree_systems = self._build_alpha_specific_tree_systems(
+                    documents, alpha, transactional_pattern, audit_pattern, [approach_name]
+                )
+                
+                if approach_name not in tree_systems:
+                    print(f"   ⚠️ Failed to build {approach_name} with α = {alpha}")
+                    continue
+                
+                # Run tests for this alpha configuration
+                alpha_result = self._run_approach_tests(
+                    approach_name, tree_systems[approach_name], documents, queries
+                )
+                alpha_result['alpha'] = alpha
+                approach_results[f"alpha_{alpha}"] = alpha_result
+                
+                print(f"   ✅ α = {alpha}: Avg gas = {alpha_result['average_gas_per_query']:.0f}, Success = {alpha_result['successful_verifications']}/{alpha_result['total_queries']}")
+            
+            tuning_results[approach_name] = approach_results
+            
+        # Generate tuning-specific reports
+        self._generate_alpha_tuning_report(tuning_results, alpha_values)
+        
+        print(f"\n🎉 Alpha tuning completed! Results saved to tuning reports.")
+        return tuning_results
     
     def _run_approach_tests(self, approach_name: str, tree_system: dict, documents: list, queries: list[Query]):
         """
@@ -612,7 +776,7 @@ class TestRunner:
                 proof, proof_flags = builder.generate_batched_proof_with_flags(document_hashes_hex)
                 
                 # Consistent proof size calculation across all approaches
-                proof_size = len(proof) * 32 + len(proof_flags)
+                proof_size = len(proof) * 32# + len(proof_flags)
                 print(f"      Generated traditional multiproof: {len(proof)} elements, {len(proof_flags)} flags")
             except Exception as e:
                 print(f"      ❌ Multiproof generation failed: {e}")
@@ -1446,6 +1610,183 @@ class TestRunner:
                     print(f"  Gas Std Dev: {np.std(gas_values):.0f}")
         
         print(f"\n� Charts and detailed metrics have been generated in: {self.reports_dir}")
+    
+    def _generate_alpha_tuning_report(self, tuning_results: dict, alpha_values: list[float]):
+        """Generate specialized reports for alpha hyperparameter tuning."""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            if self.reports_dir:
+                reports_dir = self.reports_dir
+            else:
+                reports_dir = "./test_reports"
+            
+            os.makedirs(reports_dir, exist_ok=True)
+            
+            # Create alpha tuning subdirectory
+            alpha_reports_dir = os.path.join(reports_dir, f"alpha_tuning_{timestamp}")
+            os.makedirs(alpha_reports_dir, exist_ok=True)
+            
+            print(f"\n📊 Generating alpha tuning reports...")
+            
+            # 1. Generate performance vs alpha charts for each approach
+            for approach_name, approach_data in tuning_results.items():
+                alpha_vals = []
+                avg_gas_vals = []
+                build_times = []
+                success_rates = []
+                
+                for alpha_key, alpha_result in approach_data.items():
+                    if alpha_key.startswith("alpha_"):
+                        alpha = alpha_result['alpha']
+                        alpha_vals.append(alpha)
+                        avg_gas_vals.append(alpha_result['average_gas_per_query'])
+                        build_times.append(alpha_result['build_time'])
+                        success_rate = (alpha_result['successful_verifications'] / alpha_result['total_queries'] * 100) if alpha_result['total_queries'] > 0 else 0
+                        success_rates.append(success_rate)
+                
+                if not alpha_vals:
+                    continue
+                
+                # Sort by alpha values
+                sorted_data = sorted(zip(alpha_vals, avg_gas_vals, build_times, success_rates))
+                alpha_vals, avg_gas_vals, build_times, success_rates = zip(*sorted_data)
+                
+                # Create subplots for this approach
+                fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+                fig.suptitle(f'{approach_name.replace("_", " ").title()} - Alpha Hyperparameter Tuning', fontsize=16)
+                
+                # Plot 1: Average Gas vs Alpha
+                ax1.plot(alpha_vals, avg_gas_vals, 'o-', linewidth=2, markersize=8)
+                ax1.set_xlabel('Alpha Threshold')
+                ax1.set_ylabel('Average Gas per Query')
+                ax1.set_title('Gas Efficiency vs Alpha')
+                ax1.grid(True, alpha=0.3)
+                
+                # Plot 2: Build Time vs Alpha
+                ax2.plot(alpha_vals, build_times, 's-', color='orange', linewidth=2, markersize=8)
+                ax2.set_xlabel('Alpha Threshold')
+                ax2.set_ylabel('Build Time (seconds)')
+                ax2.set_title('Build Time vs Alpha')
+                ax2.grid(True, alpha=0.3)
+                
+                # Plot 3: Success Rate vs Alpha
+                ax3.plot(alpha_vals, success_rates, '^-', color='green', linewidth=2, markersize=8)
+                ax3.set_xlabel('Alpha Threshold')
+                ax3.set_ylabel('Success Rate (%)')
+                ax3.set_title('Success Rate vs Alpha')
+                ax3.grid(True, alpha=0.3)
+                ax3.set_ylim(0, 105)
+                
+                # Plot 4: Combined Normalized Metrics
+                # Normalize metrics to 0-1 scale for comparison
+                norm_gas = [(max(avg_gas_vals) - x) / (max(avg_gas_vals) - min(avg_gas_vals)) for x in avg_gas_vals] if max(avg_gas_vals) != min(avg_gas_vals) else [0.5] * len(avg_gas_vals)
+                norm_build_time = [(max(build_times) - x) / (max(build_times) - min(build_times)) for x in build_times] if max(build_times) != min(build_times) else [0.5] * len(build_times)
+                norm_success = [x / 100.0 for x in success_rates]
+                
+                ax4.plot(alpha_vals, norm_gas, 'o-', label='Gas Efficiency (inverted)', linewidth=2, markersize=6)
+                ax4.plot(alpha_vals, norm_build_time, 's-', label='Build Speed (inverted)', linewidth=2, markersize=6)
+                ax4.plot(alpha_vals, norm_success, '^-', label='Success Rate', linewidth=2, markersize=6)
+                ax4.set_xlabel('Alpha Threshold')
+                ax4.set_ylabel('Normalized Performance (0-1)')
+                ax4.set_title('Combined Performance Metrics')
+                ax4.legend()
+                ax4.grid(True, alpha=0.3)
+                ax4.set_ylim(0, 1.05)
+                
+                plt.tight_layout()
+                
+                # Save individual approach chart
+                chart_file = os.path.join(alpha_reports_dir, f"{approach_name}_alpha_tuning.png")
+                plt.savefig(chart_file, dpi=300, bbox_inches='tight')
+                plt.close()
+                
+                print(f"  📈 Generated chart for {approach_name}: {chart_file}")
+            
+            # 2. Generate comparison chart across all approaches
+            if len(tuning_results) > 1:
+                fig, ax = plt.subplots(figsize=(12, 8))
+                
+                for approach_name, approach_data in tuning_results.items():
+                    alpha_vals = []
+                    avg_gas_vals = []
+                    
+                    for alpha_key, alpha_result in approach_data.items():
+                        if alpha_key.startswith("alpha_"):
+                            alpha_vals.append(alpha_result['alpha'])
+                            avg_gas_vals.append(alpha_result['average_gas_per_query'])
+                    
+                    if alpha_vals:
+                        # Sort by alpha values
+                        sorted_data = sorted(zip(alpha_vals, avg_gas_vals))
+                        alpha_vals, avg_gas_vals = zip(*sorted_data)
+                        
+                        ax.plot(alpha_vals, avg_gas_vals, 'o-', label=approach_name.replace('_', ' ').title(), linewidth=2, markersize=6)
+                
+                ax.set_xlabel('Alpha Threshold')
+                ax.set_ylabel('Average Gas per Query')
+                ax.set_title('Gas Efficiency Comparison Across Approaches')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                comparison_file = os.path.join(alpha_reports_dir, "alpha_tuning_comparison.png")
+                plt.savefig(comparison_file, dpi=300, bbox_inches='tight')
+                plt.close()
+                
+                print(f"  📊 Generated comparison chart: {comparison_file}")
+            
+            # 3. Generate summary report (JSON)
+            summary_data = {
+                'timestamp': datetime.now().isoformat(),
+                'alpha_values_tested': alpha_values,
+                'approaches': {}
+            }
+            
+            for approach_name, approach_data in tuning_results.items():
+                approach_summary = {
+                    'results_by_alpha': {},
+                    'optimal_alpha': None,
+                    'optimal_gas': float('inf')
+                }
+                
+                for alpha_key, alpha_result in approach_data.items():
+                    if alpha_key.startswith("alpha_"):
+                        alpha = alpha_result['alpha']
+                        approach_summary['results_by_alpha'][alpha] = {
+                            'average_gas_per_query': alpha_result['average_gas_per_query'],
+                            'build_time': alpha_result['build_time'],
+                            'success_rate': (alpha_result['successful_verifications'] / alpha_result['total_queries'] * 100) if alpha_result['total_queries'] > 0 else 0
+                        }
+                        
+                        # Track optimal alpha (lowest gas)
+                        if alpha_result['average_gas_per_query'] < approach_summary['optimal_gas']:
+                            approach_summary['optimal_gas'] = alpha_result['average_gas_per_query']
+                            approach_summary['optimal_alpha'] = alpha
+                
+                summary_data['approaches'][approach_name] = approach_summary
+            
+            summary_file = os.path.join(alpha_reports_dir, "alpha_tuning_summary.json")
+            with open(summary_file, 'w') as f:
+                json.dump(summary_data, f, indent=2)
+            
+            print(f"  📄 Generated summary report: {summary_file}")
+            print(f"\n📁 All alpha tuning reports saved to: {alpha_reports_dir}")
+            
+            # Print optimal alpha values
+            print(f"\n🎯 OPTIMAL ALPHA VALUES:")
+            for approach_name, approach_summary in summary_data['approaches'].items():
+                optimal_alpha = approach_summary['optimal_alpha']
+                optimal_gas = approach_summary['optimal_gas']
+                if optimal_alpha is not None:
+                    print(f"  {approach_name}: α = {optimal_alpha} (gas = {optimal_gas:.0f})")
+            
+        except ImportError:
+            print("⚠️ matplotlib not available - skipping alpha tuning charts")
+        except Exception as e:
+            print(f"❌ Error generating alpha tuning reports: {e}")
 
 def setup_web3_connection():
     """Setup Web3 connection for blockchain testing."""
@@ -1475,11 +1816,17 @@ def main():
     parser.add_argument('--approaches', nargs='+', default=None, 
                        help='Specific approaches to test (e.g., traditional_multiproof clustered_province)')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
+    parser.add_argument('--alpha-tuning', action='store_true', 
+                       help='Enable alpha hyperparameter tuning for pairs-first Huffman models')
+    parser.add_argument('--alpha-values', nargs='+', type=float, default=[0.05, 0.2, 0.4, 0.5, 0.7, 0.8],
+                       help='Alpha values to test during hyperparameter tuning (default: [0.05, 0.2, 0.4, 0.5, 0.7, 0.8])')
+    parser.add_argument('--alpha-overrides', type=str, default=None,
+                       help='Optional per-model alpha overrides, format: model1:0.05,model2=0.2 (keys: traditional_document_huffman, traditional_property_level_huffman, clustered_province_with_document_huffman, jurisdiction_tree)')
 
     args = parser.parse_args()
 
     print("--- 2. Seeding Phase ---")
-    seed_gen = SeedGenerator(total_properties=args.total_properties)
+    seed_gen = SeedGenerator(total_properties=args.total_properties, random_seed=42)
     property_dataset = seed_gen.generate_dataset()
 
     print("--- 3. Constructing Pattern Phase ---")
@@ -1499,14 +1846,16 @@ def main():
         use_zipfian=True,             # Enable realistic heavy-tail distribution for documents
         zipf_parameter=1.3,           # Moderate concentration (1.0-2.0 range) 
         use_property_zipfian=True,    # Enable property-level Zipfian distribution
-        property_zipf_parameter=1.1   # Gentler property concentration (economic centers favored)
+        property_zipf_parameter=1.1,  # Gentler property concentration (economic centers favored)
+        random_seed=42                # Fixed seed for reproducible patterns
     )
     audit_pattern = AuditPattern(
         province_weights=seed_gen.province_weights,
         avg_sample_size=50,        # λ for properties per province (realistic average)
         min_sample_size=10,        # Minimum to ensure meaningful audit samples
         avg_docs_per_property=3,   # λ for documents per property (realistic average)
-        min_docs_per_property=1    # Minimum to ensure at least one document
+        min_docs_per_property=1,   # Minimum to ensure at least one document
+        random_seed=42             # Fixed seed for reproducible patterns
     )
 
     print("--- 4. Constructing Workload Generator ---")
@@ -1518,7 +1867,8 @@ def main():
     workload_gen = WorkloadGenerator(
         property_dataset, 
         transactional_pattern=transactional_pattern,
-        audit_pattern=audit_pattern
+        audit_pattern=audit_pattern,
+        random_seed=42  # Fixed seed for reproducible workload generation
     )
     
     print("--- 5. Constructing Workload Generator ---")
@@ -1564,9 +1914,46 @@ def main():
     web3 = setup_web3_connection()
     runner = TestRunner(web3_instance=web3, reports_dir=args.reports_dir, verbose=args.verbose)
 
+    # Parse alpha overrides if provided
+    alpha_overrides = {}
+    if args.alpha_overrides:
+        # Accept comma-separated pairs in either key:val or key=val format
+        items = [s.strip() for s in args.alpha_overrides.split(',') if s.strip()]
+        for item in items:
+            if ':' in item:
+                k, v = item.split(':', 1)
+            elif '=' in item:
+                k, v = item.split('=', 1)
+            else:
+                print(f"⚠️  Invalid alpha override item '{item}', expected key:val or key=val")
+                continue
+            try:
+                alpha_overrides[k.strip()] = float(v.strip())
+            except ValueError:
+                print(f"⚠️  Could not parse alpha value for '{k}': '{v}'")
+
+    if alpha_overrides:
+        runner.alpha_overrides = alpha_overrides
+        print(f"  ✅ Using per-model alpha overrides: {runner.alpha_overrides}")
+
     # Select approaches to test
     selected_approaches = args.approaches if args.approaches else None
-    tree_systems = runner._build_all_tree_systems(documents, transactional_pattern, audit_pattern, selected_approaches)
+    
+    # Check if alpha tuning is requested
+    if args.alpha_tuning:
+        print("🎯 Alpha hyperparameter tuning mode enabled")
+        
+        # Run alpha tuning tests
+        tuning_results = runner.run_alpha_tuning_tests(
+            documents, final_workload, args.alpha_values, transactional_pattern, audit_pattern, selected_approaches
+        )
+        
+        print("\n✅ Alpha tuning completed successfully!")
+        print(f"📁 All tuning results and charts saved to: {args.reports_dir}")
+        return tuning_results
+    else:
+        # Normal testing mode
+        tree_systems = runner._build_all_tree_systems(documents, transactional_pattern, audit_pattern, selected_approaches)
     
     # Debug: Show sample property and document IDs from the actual generated data
     # print("\n--- Debug: Sample Generated Data ---")

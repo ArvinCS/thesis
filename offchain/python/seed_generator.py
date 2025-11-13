@@ -3,6 +3,9 @@ import uuid
 from typing import Final
 from basic_data_structure import Document, Property
 
+# Set fixed seed for reproducible dataset generation
+FIXED_SEED = 42
+
 class SeedGenerator:
     """
     Generates a realistic dataset of Indonesian properties for benchmarking.
@@ -65,8 +68,9 @@ class SeedGenerator:
         "WaterBill_Latest": 0.75,
     }
 
-    def __init__(self, total_properties: int):
+    def __init__(self, total_properties: int, random_seed: int = FIXED_SEED):
         self.total_properties = total_properties
+        self.random_seed = random_seed
         total_households = sum(self._PROVINCE_DISTRIBUTION_RAW.values())
         self.province_weights = {
             p: c / total_households for p, c in self._PROVINCE_DISTRIBUTION_RAW.items()
@@ -119,7 +123,9 @@ class SeedGenerator:
         """
         Generates the full dataset of properties based on provincial distribution.
         """
-        print(f"Generating a dataset of {self.total_properties} properties...")
+        # Set fixed seed for reproducible results
+        random.seed(self.random_seed)
+        print(f"Generating a dataset of {self.total_properties} properties (seed={self.random_seed})...")
         dataset = []
         
         provinces = list(self.province_weights.keys())

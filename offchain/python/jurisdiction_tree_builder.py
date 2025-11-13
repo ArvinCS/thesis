@@ -97,7 +97,7 @@ class PropertyDocumentGroup:
         """Add a document to this property group."""
         self.documents.append(document)
     
-    def optimize_document_order(self, document_pair_frequencies, document_frequencies):
+    def optimize_document_order(self, document_pair_frequencies, document_frequencies, alpha_threshold=0.15):
         """Apply pairs-first Huffman optimization to documents within this property."""
         if len(self.documents) <= 1:
             self.optimized_document_order = self.documents.copy()
@@ -130,8 +130,7 @@ class PropertyDocumentGroup:
                     property_pair_freq[(doc1, doc2)] = freq
                     property_pair_freq[(doc2, doc1)] = freq
         
-        # Apply pairs-first optimization with alpha threshold
-        alpha_threshold = 0.15
+        # Apply pairs-first optimization with configurable alpha threshold
         self.optimized_document_order = self._apply_pairs_first_huffman(
             self.documents, property_doc_freq, property_pair_freq, alpha_threshold
         )
@@ -140,6 +139,13 @@ class PropertyDocumentGroup:
         """Apply pairs-first Huffman optimization to documents with alpha threshold."""
         if len(documents) <= 1:
             return documents
+        
+        # Special handling for alpha = 0 to prevent computational explosion
+        if alpha_threshold <= 0:
+            print(f"      Alpha threshold: {alpha_threshold} -> Using simple frequency-based ordering (alpha=0 causes computational explosion)")
+            # Use simple frequency-based ordering instead of pairs-first Huffman
+            return sorted(documents, key=lambda doc: doc_frequencies.get(doc, 1), reverse=True)
+        
         # Implement pairs-first Huffman: 1) pre-merge strong pairs above threshold,
         # 2) run standard Huffman merging on remaining nodes, 3) extract leaf order.
         
@@ -169,6 +175,15 @@ class PropertyDocumentGroup:
         if pair_frequencies:
             max_pair_freq = max(pair_frequencies.values())
             min_threshold = max_pair_freq * alpha_threshold
+            
+            # Warn if alpha threshold results in too many pairs being processed
+            total_pairs = len(pair_frequencies)
+            strong_pairs_estimate = sum(1 for freq in pair_frequencies.values() if freq >= min_threshold)
+            if strong_pairs_estimate > 10000:  # More than 10K pairs
+                print(f"      ⚠️ Alpha threshold: {alpha_threshold} -> Min pair frequency: {min_threshold:.1f}")
+                print(f"      ⚠️ Warning: {strong_pairs_estimate:,}/{total_pairs:,} pairs will be processed (may be slow)")
+            else:
+                print(f"      Alpha threshold: {alpha_threshold} -> Min pair frequency: {min_threshold:.1f}")
 
             merged_nodes = set()
             # Sort pairs by descending frequency
@@ -277,7 +292,7 @@ class ProvinceTree:
         self.tree_layers = []
         self.total_frequency = 0
     
-    def build(self, property_frequencies, pair_frequencies, document_frequencies, document_pair_frequencies):
+    def build(self, property_frequencies, pair_frequencies, document_frequencies, document_pair_frequencies, alpha_threshold=0.15):
         """Build optimized province tree with property-level Huffman."""
         print(f"    Building province tree for {self.province_name}: {len(self.property_groups)} properties")
         
@@ -285,7 +300,7 @@ class ProvinceTree:
         all_property_groups = []
         total_docs = 0
         for prop_id, prop_group in self.property_groups.items():
-            prop_group.optimize_document_order(document_pair_frequencies, document_frequencies)
+            prop_group.optimize_document_order(document_pair_frequencies, document_frequencies, alpha_threshold)
             all_property_groups.append(prop_group)
             total_docs += len(prop_group.documents)
             print(f"      Property {prop_id}: {len(prop_group.documents)} documents")
@@ -624,7 +639,7 @@ class JurisdictionTreeBuilder:
     4. Two-phase verification system
     """
     
-    def __init__(self, all_documents, audit_pattern=None, transactional_pattern=None):
+    def __init__(self, all_documents, audit_pattern=None, transactional_pattern=None, alpha_threshold=0.15):
         self.all_documents = all_documents
         self.jurisdiction_root = None
         self.province_trees = {}  # province_name -> ProvinceTree
@@ -639,6 +654,7 @@ class JurisdictionTreeBuilder:
         
         self.audit_pattern = audit_pattern
         self.transactional_pattern = transactional_pattern
+        self.alpha_threshold = alpha_threshold  # Configurable threshold for pairs-first Huffman
         self.verification_count = 0
         
         # Group documents by province and property
@@ -757,7 +773,7 @@ class JurisdictionTreeBuilder:
             # Create province tree
             province_tree = ProvinceTree(province, property_groups)
             province_root = province_tree.build(
-                property_freq, pair_freq, document_frequencies, document_pair_frequencies
+                property_freq, pair_freq, document_frequencies, document_pair_frequencies, self.alpha_threshold
             )
             
             self.province_trees[province] = province_tree

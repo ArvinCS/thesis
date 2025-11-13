@@ -5,6 +5,9 @@ from access_patterns_enhanced import AuditPattern, TransactionalPattern
 from seed_generator import SeedGenerator, Property
 from basic_data_structure import Document
 
+# Fixed seed for reproducible workload generation
+WORKLOAD_SEED = 42
+
 # --- Step 1: Import the refined data structures and generator ---
 # This links all your framework components together.
 
@@ -28,17 +31,21 @@ class WorkloadGenerator:
     This class takes a dataset of properties and can generate lists of
     queries that simulate different user access patterns (Transactional, Audit, Mixed).
     """
-    def __init__(self, properties: list[Property], transactional_pattern: TransactionalPattern, audit_pattern: AuditPattern):
+    def __init__(self, properties: list[Property], transactional_pattern: TransactionalPattern, audit_pattern: AuditPattern, random_seed: int = WORKLOAD_SEED):
         """
         Initializes the generator with the full property dataset.
 
         Args:
             properties: A list of Property objects from the SeedGenerator.
+            transactional_pattern: Pattern for generating transactional queries.
+            audit_pattern: Pattern for generating audit queries.
+            random_seed: Fixed seed for reproducible workload generation.
         """
         if not properties:
             raise ValueError("Properties list cannot be empty.")
         
         self.properties = properties
+        self.random_seed = random_seed
         
         # Validate document ID uniqueness across all properties
         all_doc_ids = []
@@ -91,6 +98,8 @@ class WorkloadGenerator:
         Stage 1: Provincial Access Frequency (Outer Zipfian) - Select province
         Stage 2: Within-Province Property Selection (Inner Zipfian) - Select property in province
         """
+        # Set seed for reproducible transactional workload
+        random.seed(self.random_seed)
         queries = []
         
         # Stage 1: Get provincial-level Zipfian weights (Outer Zipfian)
@@ -221,6 +230,8 @@ class WorkloadGenerator:
         
         REGIONAL AUDIT PATTERN: Choose ONE OR MORE properties within SAME province
         """
+        # Set seed for reproducible regional audit workload  
+        random.seed(self.random_seed + 1)  # Use offset to ensure different from transactional
         if not self._available_doc_types:
             return []
 
@@ -263,6 +274,8 @@ class WorkloadGenerator:
         
         NATIONAL AUDIT PATTERN: Choose ONE OR MORE properties across MULTIPLE provinces
         """
+        # Set seed for reproducible national audit workload
+        random.seed(self.random_seed + 2)  # Use offset to ensure different sequence
         if not self._available_doc_types:
             return []
 
@@ -317,7 +330,8 @@ class WorkloadGenerator:
         # 2. Combine them into a single mixed workload
         mixed_queries = transactional_queries + regional_audit_queries
         
-        # 3. Shuffle the list to simulate realistic interleaved usage
+        # 3. Shuffle the list to simulate realistic interleaved usage (use separate seed for shuffle)
+        random.seed(self.random_seed + 10)  # Use distinct seed for shuffling
         random.shuffle(mixed_queries)
         
         return mixed_queries

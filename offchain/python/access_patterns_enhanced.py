@@ -6,6 +6,9 @@ from collections import Counter
 import numpy as np
 import scipy.stats as stats
 
+# Fixed seeds for reproducible access patterns
+PATTERN_SEED = 42
+
 class TransactionalPattern:
     """
     Defines and generates an assumed access pattern for transactional users
@@ -13,7 +16,8 @@ class TransactionalPattern:
     """
     def __init__(self, document_importance_map: dict[str, int], alpha_threshold: float = 0.3, 
                  use_zipfian: bool = True, zipf_parameter: float = 1.2,
-                 use_property_zipfian: bool = True, property_zipf_parameter: float = 1.1):
+                 use_property_zipfian: bool = True, property_zipf_parameter: float = 1.1,
+                 random_seed: int = PATTERN_SEED):
         """
         Args:
             document_importance_map: A dict mapping doc_types to an integer
@@ -30,6 +34,7 @@ class TransactionalPattern:
         self.zipf_parameter = zipf_parameter
         self.use_property_zipfian = use_property_zipfian
         self.property_zipf_parameter = property_zipf_parameter
+        self.random_seed = random_seed
     
     def get_document_frequencies(self, documents: list) -> dict:
         """
@@ -161,6 +166,10 @@ class TransactionalPattern:
         Uses either Zipfian distribution (realistic) or weighted sampling (legacy)
         to model document access patterns and pair co-occurrences.
         """
+        # Set seed for reproducible document pair generation
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
+        
         if len(documents) < 2:
             return Counter()
 
@@ -238,7 +247,8 @@ class AuditPattern:
     def __init__(self, province_weights: dict[str, float], 
                  avg_sample_size: int = 30, min_sample_size: int = 5,
                  min_provinces_per_audit: int = 1, max_provinces_per_audit: int = 3,
-                 avg_docs_per_property: int = 2, min_docs_per_property: int = 1):
+                 avg_docs_per_property: int = 2, min_docs_per_property: int = 1,
+                 random_seed: int = PATTERN_SEED):
         """
         Args:
             province_weights: Dict mapping province names to their selection weights
@@ -260,9 +270,11 @@ class AuditPattern:
         self.max_provinces_per_audit = max_provinces_per_audit
         self.avg_docs_per_property = avg_docs_per_property
         self.min_docs_per_property = min_docs_per_property
+        self.random_seed = random_seed
 
     def get_random_audit_region(self) -> str:
         """Selects a single, random province using a weighted distribution."""
+        random.seed(self.random_seed)
         return random.choices(self.provinces, weights=self.weights, k=1)[0]
     
     def get_cross_province_sample(self, properties_by_province: dict, num_provinces_to_sample: int = 5) -> list:
