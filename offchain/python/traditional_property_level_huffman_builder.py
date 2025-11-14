@@ -121,13 +121,13 @@ class PropertyDocumentGroup:
             return
         
         # # For very large property groups, use simple frequency-based ordering instead of expensive Huffman
-        # if len(self.documents) > 0:  # Threshold for computational efficiency
-        #     self.optimized_document_order = sorted(
-        #         self.documents,
-        #         key=lambda doc: document_frequencies.get(f"{doc.province}.{doc.property_id}.{doc.doc_id}", 1),
-        #         reverse=True
-        #     )
-        #     return
+        if len(self.documents) > 0:  # Threshold for computational efficiency
+            self.optimized_document_order = sorted(
+                self.documents,
+                key=lambda doc: document_frequencies.get(f"{doc.province}.{doc.property_id}.{doc.doc_id}", 1),
+                reverse=True
+            )
+            return
         
         # Create document frequency map for this property's documents
         property_doc_freq = {}
