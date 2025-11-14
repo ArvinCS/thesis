@@ -344,51 +344,49 @@ class ClusteredProvinceTreeBuilder:
     
     def build(self):
         """
-        Build the clustered province tree with two-level optimization:
+        Build the clustered province tree with province-based clustering:
         1. Primary: Group by province
-        2. Secondary: Each province builds an ordinary balanced Merkle tree from its documents
-           (no pairs-first Huffman merging in this ordinary clustered province builder)
+        2. Secondary: Within each province, flatten documents in deterministic order
+        3. Build a single flat balanced Merkle tree from all documents (preserving province order)
+        
+        The key difference from traditional shuffled approach is that documents are
+        ordered by province first, keeping locality benefits while using a standard
+        flat Merkle tree structure for proof compatibility.
         """
-        print("Building Clustered Province Tree with two-level optimization...")
-        # For the ordinary clustered province builder we avoid pairwise merging.
-        # Instead, for each province we build a balanced Merkle subtree from that
-        # province's documents. Then we compute a top-level balanced Merkle tree
-        # over the province roots.
-
-        # Calculate frequencies (still useful for stats) but we will not use pair merging
+        print("Building Clustered Province Tree (flat with province clustering)...")
+        
+        # Calculate frequencies (still useful for stats)
         province_freq, property_freq, pair_freq = self._calculate_frequencies()
 
         # Primary sorting: Group by province (alphabetical order for consistency)
         sorted_provinces = sorted(self.province_clusters.keys())
 
-        # Store province-level roots and leaves for downstream use
-        self.province_roots = []
-        self.province_leaves = {}
-
+        # Flatten all documents, maintaining province clusters
+        all_document_hashes = []
+        self.province_boundaries = {}  # Store where each province starts/ends
+        
         for province in sorted_provinces:
+            start_idx = len(all_document_hashes)
             property_clusters = list(self.province_clusters[province].values())
-            # Flatten documents for this province in deterministic order: sort by property id then doc id
-            doc_hashes = []
+            
+            # Flatten documents for this province in deterministic order
             for cluster in sorted(property_clusters, key=lambda c: c.property_id):
-                # Sort documents within property deterministically by doc_id
                 sorted_docs = sorted(cluster.documents, key=lambda d: d.doc_id)
                 for d in sorted_docs:
-                    doc_hashes.append(d.hash_hex)
-
-            print(f"  Building balanced subtree for province {province}: {len(doc_hashes)} documents")
-            province_root = self._build_balanced_subtree_hash(doc_hashes)
-            self.province_roots.append(province_root)
-            self.province_leaves[province] = doc_hashes
+                    all_document_hashes.append(d.hash_hex)
+            
+            end_idx = len(all_document_hashes)
+            self.province_boundaries[province] = (start_idx, end_idx)
+            print(f"  Province {province}: docs {start_idx}-{end_idx} ({end_idx - start_idx} total)")
         
-        # Build top-level balanced Merkle tree from province roots
-        if not self.province_roots:
+        # Set ordered_leaves_hex to document-level hashes (flat structure)
+        self.ordered_leaves_hex = all_document_hashes
+        
+        if not self.ordered_leaves_hex:
             self.merkle_root = keccak(b'').hex()
             return self.merkle_root
 
-        # Set ordered_leaves_hex at the top-level to province roots (hierarchical tree)
-        self.ordered_leaves_hex = list(self.province_roots)
-
-        # Build tree layers for the top-level (provinces)
+        # Build balanced Merkle tree layers from document leaves
         self.tree_layers = []
         current_layer = list(self.ordered_leaves_hex)
         self.tree_layers.append(current_layer)
@@ -407,7 +405,8 @@ class ClusteredProvinceTreeBuilder:
 
         self.merkle_root = current_layer[0] if current_layer else keccak(b'').hex()
 
-        print(f"  Clustered Province Tree (hierarchical) Root: {self.merkle_root[:16]}...")
+        print(f"  Clustered Province Tree (flat) Root: {self.merkle_root[:16]}...")
+        print(f"  Total documents: {len(self.ordered_leaves_hex)}")
         return self.merkle_root
     
     def generate_multiproof(self, leaves_to_prove_hex):
@@ -763,7 +762,7 @@ class ClusteredProvinceTreeBuilder:
     
     def generate_pathmap_proof(self, leaves_to_prove_hex):
         """Generate proof using new pathMap format for bottom-up reconstruction."""
-        if not leaves_to_prove_hex or not self.ordered_leaves_hex:
+        if not leaves_to_prove_hex:
             return {'leaves': [], 'proofHashes': [], 'pathMap': []}
         
         # Sort and deduplicate leaves
