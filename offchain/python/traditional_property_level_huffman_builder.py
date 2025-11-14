@@ -159,7 +159,9 @@ class PropertyDocumentGroup:
             documents: List of documents to optimize
             doc_frequencies: Individual document access frequencies
             pair_frequencies: Document pair co-access frequencies  
-            alpha_threshold: Minimum relative frequency for pair merging (default 0.1 = 10%)
+            alpha_threshold: Minimum relative weight w(tx) for pair merging (default 0.1 = 10%)
+                           w(tx) = q_k / min(p_i, p_j) where q_k is pair frequency,
+                           p_i and p_j are individual document frequencies
         """
         if len(documents) <= 1:
             return documents
@@ -170,23 +172,9 @@ class PropertyDocumentGroup:
             # Use simple frequency-based ordering instead of pairs-first Huffman
             return sorted(documents, key=lambda doc: doc_frequencies.get(doc, 1), reverse=True)
         
-        # Calculate alpha threshold based on maximum pair frequency
-        if pair_frequencies:
-            max_pair_freq = max(pair_frequencies.values())
-            min_pair_freq_threshold = max_pair_freq * alpha_threshold
-            
-            # Warn if alpha threshold results in too many pairs being processed
-            total_pairs = len(pair_frequencies)
-            strong_pairs_estimate = sum(1 for freq in pair_frequencies.values() if freq >= min_pair_freq_threshold)
-            if strong_pairs_estimate > 10000:  # More than 10K pairs
-                print(f"      ⚠️ Alpha threshold: {alpha_threshold} -> Min pair frequency: {min_pair_freq_threshold:.1f}")
-                print(f"      ⚠️ Warning: {strong_pairs_estimate:,}/{total_pairs:,} pairs will be processed (may be slow)")
-            else:
-                print(f"      Alpha threshold: {alpha_threshold} -> Min pair frequency: {min_pair_freq_threshold:.1f}")
-        else:
-            min_pair_freq_threshold = 0
+        print(f"      Alpha threshold (relative weight): {alpha_threshold}")
         
-        # Step 1: Pairs-first optimization with alpha threshold
+        # Step 1: Pairs-first optimization with relative weight threshold
         # Create initial document nodes
         doc_nodes = {doc: DocumentHuffmanNode(doc, doc_frequencies[doc]) for doc in documents}
         merged_pairs = set()
@@ -196,9 +184,19 @@ class PropertyDocumentGroup:
         # Sort pairs by frequency (most frequent first)
         sorted_pairs = sorted(pair_frequencies.items(), key=lambda x: x[1], reverse=True)
         
-        # Merge only strong pairs (above alpha threshold)
-        for (doc1, doc2), freq in sorted_pairs:
-            if freq >= min_pair_freq_threshold:  # Alpha threshold check
+        # Merge only strong pairs (relative weight above alpha threshold)
+        for (doc1, doc2), pair_freq in sorted_pairs:
+            # Calculate relative weight: w(tx) = q_k / min(p_i, p_j)
+            freq1 = doc_frequencies.get(doc1, 1)
+            freq2 = doc_frequencies.get(doc2, 1)
+            min_individual_freq = min(freq1, freq2)
+            
+            if min_individual_freq > 0:
+                relative_weight = pair_freq / min_individual_freq
+            else:
+                relative_weight = 0
+            
+            if relative_weight >= alpha_threshold:  # Alpha threshold check on relative weight
                 if doc1 not in merged_pairs and doc2 not in merged_pairs:
                     if doc1 in doc_nodes and doc2 in doc_nodes:
                         # Create merged node
@@ -529,12 +527,10 @@ class TraditionalPropertyLevelHuffmanBuilder:
             property_nodes.append(node)
             print(f"    Property {full_prop_id}: frequency {freq}, {len(prop_group.documents)} documents")
         
-        # Apply pairs-first Huffman with configurable alpha threshold
+        # Apply pairs-first Huffman with relative weight threshold (as per paper)
         alpha_threshold = self.alpha_threshold
         if pair_freq:
-            max_pair_freq = max(pair_freq.values())
-            min_pair_freq_threshold = max_pair_freq * alpha_threshold
-            print(f"    Property-level alpha threshold: {alpha_threshold} -> Min pair frequency: {min_pair_freq_threshold:.1f}")
+            print(f"    Property-level alpha threshold (relative weight): {alpha_threshold}")
             
             # Merge strong property pairs first
             merged_pairs = set()
@@ -542,8 +538,18 @@ class TraditionalPropertyLevelHuffmanBuilder:
             
             sorted_pairs = sorted(pair_freq.items(), key=lambda x: x[1], reverse=True)
             
-            for (prop1_id, prop2_id), freq in sorted_pairs:
-                if freq >= min_pair_freq_threshold:
+            for (prop1_id, prop2_id), pair_frequency in sorted_pairs:
+                # Calculate relative weight: w(tx) = q_k / min(p_i, p_j)
+                freq1 = property_freq.get(prop1_id, 1)
+                freq2 = property_freq.get(prop2_id, 1)
+                min_individual_freq = min(freq1, freq2)
+                
+                if min_individual_freq > 0:
+                    relative_weight = pair_frequency / min_individual_freq
+                else:
+                    relative_weight = 0
+                
+                if relative_weight >= alpha_threshold:
                     # Find corresponding nodes
                     node1 = next((n for n in property_nodes if f"{n.property_group.province}.{n.property_group.property_id}" == prop1_id), None)
                     node2 = next((n for n in property_nodes if f"{n.property_group.province}.{n.property_group.property_id}" == prop2_id), None)
