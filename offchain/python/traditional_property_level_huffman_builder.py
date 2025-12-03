@@ -92,13 +92,20 @@ class PropertyHuffmanNode:
                 all_docs.extend(self.right.get_all_documents())
             return all_docs
     
-    def compute_depths(self, depth=0):
-        """Compute depth for all nodes in subtree."""
-        self.depth = depth
-        if self.left:
-            self.left.compute_depths(depth + 1)
-        if self.right:
-            self.right.compute_depths(depth + 1)
+    def compute_depths(self, depth=0, visited=None):
+        """Compute depth for all nodes iteratively (avoids stack overflow with deep trees)."""
+        # Use iterative approach with explicit stack to handle deep trees (5000+ nodes)
+        stack = [(self, depth)]
+        
+        while stack:
+            node, current_depth = stack.pop()
+            node.depth = current_depth
+            
+            # Push children onto stack (right first, then left, so left is processed first)
+            if node.right:
+                stack.append((node.right, current_depth + 1))
+            if node.left:
+                stack.append((node.left, current_depth + 1))
 
 
 class PropertyDocumentGroup:
@@ -355,15 +362,16 @@ class TraditionalPropertyLevelHuffmanBuilder:
         
         # Use transactional pattern for property and pair frequencies
         if self.transactional_pattern:
-            # Calculate property frequencies
-            for province, property_groups in self.province_property_groups.items():
-                for prop_id, group in property_groups.items():
-                    if group.documents:
-                        doc_frequencies = self.transactional_pattern.get_document_frequencies(group.documents)
-                        prop_freq = sum(doc_frequencies.values())
-                        full_prop_id = f"{province}.{prop_id}"
-                        property_freq[full_prop_id] = prop_freq
-                        province_freq[province] += prop_freq
+            # Calculate property frequencies based on Zipfian distribution (for transactional queries)
+            property_frequencies = self.transactional_pattern.get_property_access_frequencies(
+                self.province_property_groups
+            )
+            
+            # Store property frequencies and aggregate to province level
+            for full_prop_id, freq in property_frequencies.items():
+                property_freq[full_prop_id] = freq
+                province = full_prop_id.split('.')[0]
+                province_freq[province] += freq
             
             # Calculate pair frequencies using simulated queries within each property group
             for province, province_groups in self.province_property_groups.items():
@@ -449,7 +457,7 @@ class TraditionalPropertyLevelHuffmanBuilder:
         all_property_groups = []
         for province, property_groups in self.province_property_groups.items():
             for property_id, property_group in property_groups.items():
-                print(f"  Pre-optimizing documents in {province}.{property_id}: {len(property_group.documents)} documents")
+                # print(f"  Pre-optimizing documents in {province}.{property_id}: {len(property_group.documents)} documents")
                 
                 # Apply document-level Huffman within property
                 if len(property_group.documents) > 1:
@@ -484,34 +492,12 @@ class TraditionalPropertyLevelHuffmanBuilder:
         
         print(f"  Total unique leaves from unbalanced tree: {len(self.ordered_leaves_hex)}")
         
-        # Step 4: Compute Merkle root from the unbalanced structure
+        # Step 4: Compute Merkle root from the unbalanced Huffman structure
         self.merkle_root = self._compute_unbalanced_merkle_root()
         
-        print(f"  Traditional Property-Level Huffman Tree Root: {self.merkle_root[:16]}...")
+        print(f"  Traditional Property-Level Huffman Tree Root (unbalanced): {self.merkle_root[:16]}...")
+        
         return self.merkle_root
-        
-        # # Build flat Merkle tree bottom-up
-        # self.tree_layers = []
-        # current_layer = list(self.ordered_leaves_hex)
-        # self.tree_layers.append(current_layer)
-        
-        # while len(current_layer) > 1:
-        #     # Pad with last element if odd number
-        #     if len(current_layer) % 2 != 0:
-        #         current_layer.append(current_layer[-1])
-            
-        #     next_layer = []
-        #     for i in range(0, len(current_layer), 2):
-        #         parent_hash = combine_and_hash(current_layer[i], current_layer[i + 1])
-        #         next_layer.append(parent_hash)
-            
-        #     self.tree_layers.append(next_layer)
-        #     current_layer = next_layer
-        
-        # self.merkle_root = current_layer[0] if current_layer else keccak(b'').hex()
-        
-        # print(f"  Clustered Province + Document Huffman Tree Root: {self.merkle_root[:16]}...")
-        # return self.merkle_root
     
     def _build_property_huffman_tree(self, property_groups, property_freq, pair_freq):
         """Build true unbalanced Huffman tree at property level."""
@@ -538,6 +524,13 @@ class TraditionalPropertyLevelHuffmanBuilder:
             
             sorted_pairs = sorted(pair_freq.items(), key=lambda x: x[1], reverse=True)
             
+            # Create a mapping from property_id to node for efficient lookup
+            prop_id_to_node = {}
+            for n in property_nodes:
+                if n.property_group:
+                    full_id = f"{n.property_group.province}.{n.property_group.property_id}"
+                    prop_id_to_node[full_id] = n
+            
             for (prop1_id, prop2_id), pair_frequency in sorted_pairs:
                 # Calculate relative weight: w(tx) = q_k / min(p_i, p_j)
                 freq1 = property_freq.get(prop1_id, 1)
@@ -550,19 +543,41 @@ class TraditionalPropertyLevelHuffmanBuilder:
                     relative_weight = 0
                 
                 if relative_weight >= alpha_threshold:
-                    # Find corresponding nodes
-                    node1 = next((n for n in property_nodes if f"{n.property_group.province}.{n.property_group.property_id}" == prop1_id), None)
-                    node2 = next((n for n in property_nodes if f"{n.property_group.province}.{n.property_group.property_id}" == prop2_id), None)
+                    # Find corresponding nodes using the mapping
+                    node1 = prop_id_to_node.get(prop1_id)
+                    node2 = prop_id_to_node.get(prop2_id)
                     
-                    if node1 and node2 and node1 not in merged_pairs and node2 not in merged_pairs:
+                    if node1 and node2 and node1 is not node2 and node1 not in merged_pairs and node2 not in merged_pairs:
+                        # Validate no cycles
+                        if node1.left is node2 or node1.right is node2 or node2.left is node1 or node2.right is node1:
+                            print(f"    WARNING: Skipping merge - would create cycle between {prop1_id} and {prop2_id}")
+                            continue
+                        
+                        # Debug: Verify nodes don't already have parents
+                        if node1.left is not None or node1.right is not None:
+                            print(f"    WARNING: node1 {prop1_id} already has children: left={node1.left}, right={node1.right}")
+                        if node2.left is not None or node2.right is not None:
+                            print(f"    WARNING: node2 {prop2_id} already has children: left={node2.left}, right={node2.right}")
+                        
                         # Create merged node
                         merged_node = PropertyHuffmanNode(None, node1.freq + node2.freq)
                         merged_node.left = node1
                         merged_node.right = node2
                         
+                        # Debug: Verify removal
+                        nodes_before = len(property_nodes)
+                        
+                        # Remove merged nodes from mapping
+                        prop_id_to_node.pop(prop1_id, None)
+                        prop_id_to_node.pop(prop2_id, None)
+                        
                         # Replace nodes in list
                         property_nodes = [n for n in property_nodes if n != node1 and n != node2]
                         property_nodes.append(merged_node)
+                        
+                        nodes_after = len(property_nodes)
+                        if nodes_before - nodes_after != 1:  # Should be -2 +1 = -1
+                            print(f"    WARNING: Expected to reduce nodes by 1, but went from {nodes_before} to {nodes_after}")
                         
                         merged_pairs.add(node1)
                         merged_pairs.add(node2)
@@ -574,15 +589,26 @@ class TraditionalPropertyLevelHuffmanBuilder:
         heap = property_nodes.copy()
         heapq.heapify(heap)
         
+        print(f"    Starting standard Huffman building with {len(heap)} nodes")
+        merge_count = 0
+        
         while len(heap) > 1:
             left = heapq.heappop(heap)
             right = heapq.heappop(heap)
+            
+            # Check if nodes already have multiple parents (would indicate reuse bug)
+            left_id = f"{left.property_group.province}.{left.property_group.property_id}" if left.property_group else f"internal_{id(left)}"
+            right_id = f"{right.property_group.province}.{right.property_group.property_id}" if right.property_group else f"internal_{id(right)}"
             
             merged = PropertyHuffmanNode(None, left.freq + right.freq)
             merged.left = left
             merged.right = right
             
             heapq.heappush(heap, merged)
+            merge_count += 1
+            
+            if merge_count <= 5 or merge_count % 100 == 0:
+                print(f"      Merge #{merge_count}: {left_id} + {right_id} -> freq={merged.freq}")
         
         root = heap[0] if heap else None
         if root:
@@ -592,18 +618,26 @@ class TraditionalPropertyLevelHuffmanBuilder:
         return root
     
     def _extract_leaves_from_huffman_tree(self, node):
-        """Extract leaves from unbalanced Huffman tree using in-order traversal."""
+        """Extract leaves from unbalanced Huffman tree iteratively (avoids stack overflow)."""
         if node is None:
             return
         
-        if node.property_group is not None:
-            # Leaf node - add all documents from this property
-            for doc in node.property_group.optimized_document_order:
-                self.ordered_leaves_hex.append(doc.hash_hex)
-        else:
-            # Internal node - traverse children
-            self._extract_leaves_from_huffman_tree(node.left)
-            self._extract_leaves_from_huffman_tree(node.right)
+        # Use iterative pre-order traversal with explicit stack
+        stack = [node]
+        
+        while stack:
+            current = stack.pop()
+            
+            if current.property_group is not None:
+                # Leaf node - add all documents from this property
+                for doc in current.property_group.optimized_document_order:
+                    self.ordered_leaves_hex.append(doc.hash_hex)
+            else:
+                # Internal node - push children (right first, then left for in-order)
+                if current.right:
+                    stack.append(current.right)
+                if current.left:
+                    stack.append(current.left)
     
     def _compute_unbalanced_merkle_root(self):
         """Compute Merkle root preserving the unbalanced structure."""
@@ -616,23 +650,49 @@ class TraditionalPropertyLevelHuffmanBuilder:
         return self._compute_node_hash(self.property_huffman_root, doc_to_hash)
     
     def _compute_node_hash(self, node, doc_to_hash):
-        """Recursively compute hash for a node in the unbalanced tree."""
+        """Iteratively compute hash for nodes in the unbalanced tree using post-order traversal."""
         if node is None:
             return keccak(b'').hex()
         
-        if node.property_group is not None:
-            # Leaf node - compute hash of all documents in this property
-            if len(node.all_documents) == 1:
-                return node.all_documents[0].hash_hex
+        # Use iterative post-order traversal with explicit stack
+        # We need to compute children before parents, so we use post-order
+        stack = []
+        node_hash_map = {}  # Cache computed hashes
+        last_visited = None
+        current = node
+        
+        while stack or current:
+            # Go to leftmost node
+            if current:
+                stack.append(current)
+                current = current.left
             else:
-                # Build balanced subtree for documents within this property
-                doc_hashes = [doc.hash_hex for doc in node.all_documents]
-                return self._compute_balanced_subtree_hash(doc_hashes)
-        else:
-            # Internal node - combine children
-            left_hash = self._compute_node_hash(node.left, doc_to_hash)
-            right_hash = self._compute_node_hash(node.right, doc_to_hash)
-            return combine_and_hash(left_hash, right_hash)
+                peek_node = stack[-1]
+                
+                # If right child exists and hasn't been processed yet
+                if peek_node.right and last_visited != peek_node.right:
+                    current = peek_node.right
+                else:
+                    # Process this node
+                    if peek_node.property_group is not None:
+                        # Leaf node - compute hash of all documents in this property
+                        if len(peek_node.all_documents) == 1:
+                            node_hash_map[id(peek_node)] = peek_node.all_documents[0].hash_hex
+                        else:
+                            # Build balanced subtree for documents within this property
+                            doc_hashes = [doc.hash_hex for doc in peek_node.all_documents]
+                            node_hash_map[id(peek_node)] = self._compute_balanced_subtree_hash(doc_hashes)
+                    else:
+                        # Internal node - combine children hashes
+                        left_hash = node_hash_map.get(id(peek_node.left), keccak(b'').hex()) if peek_node.left else keccak(b'').hex()
+                        right_hash = node_hash_map.get(id(peek_node.right), keccak(b'').hex()) if peek_node.right else keccak(b'').hex()
+                        node_hash_map[id(peek_node)] = combine_and_hash(left_hash, right_hash)
+                    
+                    stack.pop()
+                    last_visited = peek_node
+                    current = None
+        
+        return node_hash_map.get(id(node), keccak(b'').hex())
     
     def _compute_balanced_subtree_hash(self, hashes):
         """Compute hash for a balanced subtree of document hashes."""
@@ -960,29 +1020,366 @@ class TraditionalPropertyLevelHuffmanBuilder:
         }
     
     def generate_pathmap_proof(self, leaves_to_prove_hex):
-        """Generate proof using pathMap format for unbalanced tree bottom-up reconstruction."""
-        if not leaves_to_prove_hex or not self.ordered_leaves_hex or not self.property_huffman_root:
+        """Generate proof for hierarchical structure: unbalanced Huffman tree of properties, 
+        each containing balanced subtree of documents."""
+        if not leaves_to_prove_hex or not self.property_huffman_root:
             return {'leaves': [], 'proofHashes': [], 'pathMap': []}
         
         # Sort and deduplicate leaves
         sorted_leaves = sorted(set(leaves_to_prove_hex))
         
-        # Find which property groups contain the requested leaves
-        leaf_to_property = {}
-        property_nodes = []
+        # Step 1: Map each document to its property node
+        doc_to_property = {}
+        doc_to_property_docs = {}  # Map doc to all docs in its property
         
-        def collect_property_nodes(node):
+        def collect_property_mappings(node):
+            """Collect mapping of documents to property nodes."""
             if node is None:
                 return
+            stack = [node]
+            while stack:
+                current = stack.pop()
+                if current is None:
+                    continue
+                if current.property_group is not None:
+                    # This is a property node (leaf in Huffman tree)
+                    property_docs = current.property_group.optimized_document_order
+                    for doc in property_docs:
+                        doc_to_property[doc.hash_hex] = current
+                        doc_to_property_docs[doc.hash_hex] = [d.hash_hex for d in property_docs]
+                else:
+                    if current.right:
+                        stack.append(current.right)
+                    if current.left:
+                        stack.append(current.left)
+        
+        collect_property_mappings(self.property_huffman_root)
+        
+        # Step 2: Group requested documents by property
+        property_to_docs = {}
+        for doc_hash in sorted_leaves:
+            if doc_hash in doc_to_property:
+                prop_node = doc_to_property[doc_hash]
+                if prop_node not in property_to_docs:
+                    property_to_docs[prop_node] = []
+                property_to_docs[prop_node].append(doc_hash)
+        
+        if not property_to_docs:
+            return {'leaves': [], 'proofHashes': [], 'pathMap': []}
+        
+        # Step 3: Generate combined proof
+        leaves = list(sorted_leaves)
+        proof_hashes = []
+        path_map = []
+        working_set = {}  # Maps hash -> index in working set
+        
+        # Add leaves to working set
+        for i, leaf in enumerate(leaves):
+            working_set[leaf] = i
+        
+        next_idx = len(leaves)
+        
+        # Step 4: For each involved property, generate subtree proofs and property hash
+        property_hashes = {}  # Maps property node -> its hash
+        
+        for prop_node, requested_docs in property_to_docs.items():
+            all_prop_docs = [d.hash_hex for d in prop_node.property_group.optimized_document_order]
+            
+            # Generate balanced subtree proof for documents within this property
+            if len(all_prop_docs) == 1:
+                # Single document - hash is the document itself
+                property_hashes[id(prop_node)] = all_prop_docs[0]
+            else:
+                # Multiple documents - need to prove through balanced subtree
+                # Build balanced subtree and generate proof
+                subtree_proof_data = self._generate_balanced_subtree_proof(
+                    all_prop_docs, requested_docs, working_set, proof_hashes, path_map, next_idx
+                )
+                property_hashes[id(prop_node)] = subtree_proof_data['property_hash']
+                next_idx = subtree_proof_data['next_idx']
+        
+        # Step 5: Generate proof through unbalanced Huffman tree
+        # Traverse from involved properties to root
+        huffman_proof_data = self._generate_huffman_tree_proof(
+            property_to_docs.keys(), property_hashes, working_set, proof_hashes, path_map, next_idx
+        )
+        
+        return {
+            'leaves': leaves,
+            'proofHashes': proof_hashes,
+            'pathMap': path_map
+        }
+    
+    def _generate_balanced_subtree_proof(self, all_docs, requested_docs, working_set, proof_hashes, path_map, next_idx):
+        """Generate proof for requested documents within a balanced subtree.
+        
+        Args:
+            all_docs: All document hashes in this property (in order)
+            requested_docs: Subset of documents that need to be proven
+            working_set: Current working set (hash -> index)
+            proof_hashes: List to append proof hashes to
+            path_map: List to append path instructions to
+            next_idx: Next available index for computed values
+            
+        Returns:
+            dict with 'property_hash' and 'next_idx'
+        """
+        # Build balanced tree layers for this property's documents
+        layers = [list(all_docs)]
+        current = list(all_docs)
+        
+        while len(current) > 1:
+            if len(current) % 2 != 0:
+                current.append(current[-1])
+            next_layer = []
+            for i in range(0, len(current), 2):
+                next_layer.append(combine_and_hash(current[i], current[i + 1]))
+            layers.append(next_layer)
+            current = next_layer
+        
+        property_hash = current[0]
+        
+        # Find which nodes are needed for proof
+        requested_set = set(requested_docs)
+        proof_nodes = set()
+        
+        # Add requested documents
+        for doc in requested_docs:
+            if doc in all_docs:
+                idx = all_docs.index(doc)
+                proof_nodes.add((0, idx))
+        
+        # Traverse up, collecting siblings
+        for layer_idx in range(len(layers) - 1):
+            current_layer = layers[layer_idx]
+            next_layer = layers[layer_idx + 1]
+            
+            nodes_to_process = [(l, i) for l, i in proof_nodes if l == layer_idx]
+            
+            for layer, idx in nodes_to_process:
+                # Add parent
+                parent_idx = idx // 2
+                proof_nodes.add((layer_idx + 1, parent_idx))
+                
+                # Add sibling
+                sibling_idx = idx ^ 1
+                if sibling_idx < len(current_layer):
+                    proof_nodes.add((layer_idx, sibling_idx))
+        
+        # Separate into proof hashes and computable nodes
+        computable = set()
+        for layer_idx in range(1, len(layers)):
+            for layer, idx in [(l, i) for l, i in proof_nodes if l == layer_idx]:
+                left_child = (layer - 1, idx * 2)
+                right_child = (layer - 1, idx * 2 + 1)
+                if left_child in proof_nodes and right_child in proof_nodes:
+                    computable.add((layer, idx))
+        
+        # Add non-computable siblings as proof hashes
+        for layer, idx in sorted(proof_nodes):
+            if layer == 0:
+                # Skip - documents already in working set
+                continue
+            if (layer, idx) not in computable:
+                hash_val = layers[layer][idx]
+                if hash_val not in working_set:
+                    proof_hashes.append(hash_val)
+                    working_set[hash_val] = next_idx
+                    next_idx += 1
+        
+        # Generate path instructions for computable nodes
+        for layer_idx in range(1, len(layers)):
+            for layer, idx in sorted([(l, i) for l, i in proof_nodes if l == layer_idx and (l, i) in computable]):
+                left_child = (layer - 1, idx * 2)
+                right_child = (layer - 1, idx * 2 + 1)
+                
+                left_hash = layers[layer - 1][left_child[1]]
+                right_hash = layers[layer - 1][right_child[1]]
+                
+                left_idx = working_set.get(left_hash)
+                right_idx = working_set.get(right_hash)
+                
+                if left_idx is not None and right_idx is not None:
+                    node_hash = layers[layer][idx]
+                    if node_hash not in working_set:
+                        path_map.extend([left_idx, right_idx])
+                        working_set[node_hash] = next_idx
+                        next_idx += 1
+        
+        return {'property_hash': property_hash, 'next_idx': next_idx}
+    
+    def _generate_huffman_tree_proof(self, involved_properties, property_hashes, working_set, proof_hashes, path_map, next_idx):
+        """Generate proof through unbalanced Huffman tree from properties to root.
+        
+        Args:
+            involved_properties: Set of property nodes that contain requested documents
+            property_hashes: Maps property node id -> its hash
+            working_set: Current working set (hash -> index)
+            proof_hashes: List to append proof hashes to
+            path_map: List to append path instructions to
+            next_idx: Next available index for computed values
+            
+        Returns:
+            dict with 'next_idx'
+        """
+        involved_set = set(involved_properties)
+        
+        # Pre-compute all node hashes in Huffman tree
+        node_hash_cache = {}
+        
+        def compute_huffman_hashes(node):
+            if node is None:
+                return keccak(b'').hex()
+            stack = []
+            last_visited = None
+            current = node
+            
+            while stack or current:
+                if current:
+                    stack.append(current)
+                    current = current.left
+                else:
+                    peek = stack[-1]
+                    if peek.right and last_visited != peek.right:
+                        current = peek.right
+                    else:
+                        if peek.property_group is not None:
+                            # Use cached property hash
+                            node_hash_cache[id(peek)] = property_hashes.get(id(peek), keccak(b'').hex())
+                        else:
+                            left_h = node_hash_cache.get(id(peek.left), keccak(b'').hex()) if peek.left else keccak(b'').hex()
+                            right_h = node_hash_cache.get(id(peek.right), keccak(b'').hex()) if peek.right else keccak(b'').hex()
+                            node_hash_cache[id(peek)] = combine_and_hash(left_h, right_h)
+                        stack.pop()
+                        last_visited = peek
+                        current = None
+        
+        compute_huffman_hashes(self.property_huffman_root)
+        
+        # Mark which nodes are needed (post-order traversal)
+        node_needed = {}
+        stack = []
+        last_visited = None
+        current = self.property_huffman_root
+        
+        while stack or current:
+            if current:
+                stack.append(current)
+                current = current.left
+            else:
+                peek = stack[-1]
+                if peek.right and last_visited != peek.right:
+                    current = peek.right
+                else:
+                    if peek.property_group is not None:
+                        node_needed[id(peek)] = peek in involved_set
+                    else:
+                        left_needed = node_needed.get(id(peek.left), False) if peek.left else False
+                        right_needed = node_needed.get(id(peek.right), False) if peek.right else False
+                        node_needed[id(peek)] = left_needed or right_needed
+                    stack.pop()
+                    last_visited = peek
+                    current = None
+        
+        # Property hashes should already be in working set from subtree proof generation
+        # For properties NOT in working set, add them to proof hashes
+        for prop_node in involved_properties:
+            prop_hash = property_hashes.get(id(prop_node))
+            if prop_hash and prop_hash not in working_set:
+                # Property hash not in working set - add to proofHashes
+                proof_hashes.append(prop_hash)
+                working_set[prop_hash] = next_idx
+                next_idx += 1
+        
+        # Collect sibling hashes (post-order traversal)
+        stack = []
+        last_visited = None
+        current = self.property_huffman_root
+        
+        while stack or current:
+            if current:
+                stack.append(current)
+                current = current.left
+            else:
+                peek = stack[-1]
+                if peek.right and last_visited != peek.right:
+                    current = peek.right
+                else:
+                    if node_needed.get(id(peek), False) and not peek.property_group:
+                        # Internal node in proof path
+                        left_needed = node_needed.get(id(peek.left), False) if peek.left else False
+                        right_needed = node_needed.get(id(peek.right), False) if peek.right else False
+                        
+                        # Add sibling hash if one child is needed but not the other
+                        if left_needed and not right_needed and peek.right:
+                            sibling_hash = node_hash_cache.get(id(peek.right))
+                            if sibling_hash and sibling_hash not in working_set:
+                                proof_hashes.append(sibling_hash)
+                                working_set[sibling_hash] = next_idx
+                                next_idx += 1
+                        elif right_needed and not left_needed and peek.left:
+                            sibling_hash = node_hash_cache.get(id(peek.left))
+                            if sibling_hash and sibling_hash not in working_set:
+                                proof_hashes.append(sibling_hash)
+                                working_set[sibling_hash] = next_idx
+                                next_idx += 1
+                    stack.pop()
+                    last_visited = peek
+                    current = None
+        
+        # Generate path instructions (post-order traversal again)
+        stack = []
+        last_visited = None
+        current = self.property_huffman_root
+        
+        while stack or current:
+            if current:
+                stack.append(current)
+                current = current.left
+            else:
+                peek = stack[-1]
+                if peek.right and last_visited != peek.right:
+                    current = peek.right
+                else:
+                    if node_needed.get(id(peek), False) and not peek.property_group:
+                        # Internal node - check if both children are in working set
+                        left_hash = node_hash_cache.get(id(peek.left)) if peek.left else None
+                        right_hash = node_hash_cache.get(id(peek.right)) if peek.right else None
+                        
+                        if left_hash and right_hash:
+                            left_idx = working_set.get(left_hash)
+                            right_idx = working_set.get(right_hash)
+                            
+                            if left_idx is not None and right_idx is not None:
+                                node_hash = node_hash_cache.get(id(peek))
+                                if node_hash and node_hash not in working_set:
+                                    path_map.extend([left_idx, right_idx])
+                                    working_set[node_hash] = next_idx
+                                    next_idx += 1
+                    stack.pop()
+                    last_visited = peek
+                    current = None
+        
+        return {'next_idx': next_idx}
+    
+    def _get_descendants(self, node):
+        """Get all property node descendants of a node - iterative version."""
+        if node is None:
+            return set()
+        stack = [self.property_huffman_root] if self.property_huffman_root else []
+        while stack:
+            node = stack.pop()
+            if node is None:
+                continue
             if node.property_group is not None:
                 property_nodes.append(node)
                 for doc in node.property_group.optimized_document_order:
                     leaf_to_property[doc.hash_hex] = node
             else:
-                collect_property_nodes(node.left)
-                collect_property_nodes(node.right)
-        
-        collect_property_nodes(self.property_huffman_root)
+                if node.right:
+                    stack.append(node.right)
+                if node.left:
+                    stack.append(node.left)
         
         # Find property nodes that contain requested leaves
         involved_properties = set()
@@ -1000,74 +1397,269 @@ class TraditionalPropertyLevelHuffmanBuilder:
         # For unbalanced tree, we need to generate proofs based on the Huffman tree structure
         # This is more complex than balanced trees but provides better efficiency for frequent properties
         
-        # Collect all nodes in proof path
+        # Collect all nodes in proof path using iterative post-order traversal
         proof_nodes = set()
+        node_needed = {}  # Track if node is needed in proof path
         
-        def collect_proof_nodes(node, target_properties):
-            if node is None:
-                return False
-            
-            if node.property_group is not None:
-                # Leaf node
-                if node in target_properties:
-                    proof_nodes.add(node)
-                    return True
-                return False
+        stack = []
+        last_visited = None
+        current = self.property_huffman_root
+        
+        while stack or current:
+            if current:
+                stack.append(current)
+                current = current.left
             else:
-                # Internal node
-                left_needed = collect_proof_nodes(node.left, target_properties)
-                right_needed = collect_proof_nodes(node.right, target_properties)
-                
-                if left_needed or right_needed:
-                    proof_nodes.add(node)
-                    return True
-                return False
-        
-        collect_proof_nodes(self.property_huffman_root, involved_properties)
+                peek_node = stack[-1]
+                if peek_node.right and last_visited != peek_node.right:
+                    current = peek_node.right
+                else:
+                    # Process this node
+                    if peek_node.property_group is not None:
+                        # Leaf node
+                        if peek_node in involved_properties:
+                            proof_nodes.add(peek_node)
+                            node_needed[id(peek_node)] = True
+                        else:
+                            node_needed[id(peek_node)] = False
+                    else:
+                        # Internal node
+                        left_needed = node_needed.get(id(peek_node.left), False) if peek_node.left else False
+                        right_needed = node_needed.get(id(peek_node.right), False) if peek_node.right else False
+                        
+                        if left_needed or right_needed:
+                            proof_nodes.add(peek_node)
+                            node_needed[id(peek_node)] = True
+                        else:
+                            node_needed[id(peek_node)] = False
+                    
+                    stack.pop()
+                    last_visited = peek_node
+                    current = None
         
         # Generate simplified proof for unbalanced structure
         # For now, use a basic approach that works with the pathMap format
         
         leaves = list(sorted_leaves)
         
-        # For unbalanced trees, we need sibling nodes at various depths
-        def collect_siblings(node, target_properties, depth=0):
-            if node is None:
-                return
+        # For unbalanced trees, we need sibling nodes at various depths - iterative version
+        # First get descendants and hashes for all nodes
+        node_descendants = {}
+        node_hash_map = {}
+        
+        def get_descendants_iterative(root):
+            if root is None:
+                return set()
             
-            if node.property_group is not None:
-                return
+            stack = []
+            last_visited = None
+            current = root
             
-            left_has_target = any(p in self._get_descendants(node.left) for p in target_properties) if node.left else False
-            right_has_target = any(p in self._get_descendants(node.right) for p in target_properties) if node.right else False
+            while stack or current:
+                if current:
+                    stack.append(current)
+                    current = current.left
+                else:
+                    peek_node = stack[-1]
+                    if peek_node.right and last_visited != peek_node.right:
+                        current = peek_node.right
+                    else:
+                        # Process this node
+                        if peek_node.property_group is not None:
+                            node_descendants[id(peek_node)] = {peek_node}
+                            # Compute hash for property node
+                            if peek_node.property_group.optimized_document_order:
+                                doc_hashes = [doc.hash_hex for doc in peek_node.property_group.optimized_document_order]
+                                if len(doc_hashes) == 1:
+                                    node_hash_map[id(peek_node)] = doc_hashes[0]
+                                else:
+                                    node_hash_map[id(peek_node)] = self._compute_balanced_subtree_hash(doc_hashes)
+                        else:
+                            descendants = set()
+                            if peek_node.left:
+                                descendants.update(node_descendants.get(id(peek_node.left), set()))
+                            if peek_node.right:
+                                descendants.update(node_descendants.get(id(peek_node.right), set()))
+                            node_descendants[id(peek_node)] = descendants
+                            # Compute hash for internal node
+                            left_hash = node_hash_map.get(id(peek_node.left), keccak(b'').hex()) if peek_node.left else keccak(b'').hex()
+                            right_hash = node_hash_map.get(id(peek_node.right), keccak(b'').hex()) if peek_node.right else keccak(b'').hex()
+                            node_hash_map[id(peek_node)] = combine_and_hash(left_hash, right_hash)
+                        
+                        stack.pop()
+                        last_visited = peek_node
+                        current = None
+            
+            return node_descendants.get(id(root), set())
+        
+        get_descendants_iterative(self.property_huffman_root)
+        
+        # Now collect siblings iteratively
+        stack = [self.property_huffman_root] if self.property_huffman_root else []
+        while stack:
+            node = stack.pop()
+            if node is None or node.property_group is not None:
+                continue
+            
+            left_descendants = node_descendants.get(id(node.left), set()) if node.left else set()
+            right_descendants = node_descendants.get(id(node.right), set()) if node.right else set()
+            
+            left_has_target = any(p in left_descendants for p in involved_properties)
+            right_has_target = any(p in right_descendants for p in involved_properties)
             
             if left_has_target and not right_has_target:
                 # Need right sibling
                 if node.right:
-                    right_hash = self._compute_node_hash(node.right, {})
-                    if right_hash not in proof_hashes:
+                    right_hash = node_hash_map.get(id(node.right))
+                    if right_hash and right_hash not in proof_hashes:
                         proof_hashes.append(right_hash)
             elif right_has_target and not left_has_target:
                 # Need left sibling
                 if node.left:
-                    left_hash = self._compute_node_hash(node.left, {})
-                    if left_hash not in proof_hashes:
+                    left_hash = node_hash_map.get(id(node.left))
+                    if left_hash and left_hash not in proof_hashes:
                         proof_hashes.append(left_hash)
             
-            # Recurse
-            if left_has_target:
-                collect_siblings(node.left, target_properties, depth + 1)
-            if right_has_target:
-                collect_siblings(node.right, target_properties, depth + 1)
+            # Add children to stack
+            if left_has_target and node.left:
+                stack.append(node.left)
+            if right_has_target and node.right:
+                stack.append(node.right)
         
-        collect_siblings(self.property_huffman_root, involved_properties)
+        # Generate pathMap instructions for bottom-up reconstruction of unbalanced tree
+        # Build a working set index mapping for proper reconstruction
+        working_set_indices = {}
         
-        # Generate pathMap instructions for bottom-up reconstruction
-        # This is simplified for the unbalanced case
-        instruction_count = len(proof_hashes)
-        for i in range(instruction_count):
-            if i * 2 < len(leaves):
-                path_map.extend([i * 2, (i * 2) + 1])
+        # Step 1: Add all leaves to working set
+        for i, leaf in enumerate(leaves):
+            working_set_indices[leaf] = i
+        
+        # Step 2: Add all proof hashes to working set
+        for i, proof_hash in enumerate(proof_hashes):
+            working_set_indices[proof_hash] = len(leaves) + i
+        
+        # Step 3: Generate pathMap by traversing tree and recording hash operations
+        next_computed_idx = len(leaves) + len(proof_hashes)
+        computed_hashes = {}
+        
+        # PRE-COMPUTE ALL NODE HASHES ONCE to avoid O(n²) behavior
+        # Build hash cache for all nodes in the tree
+        node_hash_cache = {}
+        
+        def build_hash_cache(root):
+            """Pre-compute hashes for all nodes in tree."""
+            if root is None:
+                return
+            
+            stack = []
+            last_visited = None
+            current = root
+            
+            while stack or current:
+                if current:
+                    stack.append(current)
+                    current = current.left
+                else:
+                    peek_node = stack[-1]
+                    if peek_node.right and last_visited != peek_node.right:
+                        current = peek_node.right
+                    else:
+                        # Compute hash for this node
+                        if peek_node.property_group is not None:
+                            # Leaf - use first document hash
+                            if peek_node.property_group.optimized_document_order:
+                                doc_hashes = [doc.hash_hex for doc in peek_node.property_group.optimized_document_order]
+                                if len(doc_hashes) == 1:
+                                    node_hash_cache[id(peek_node)] = doc_hashes[0]
+                                else:
+                                    node_hash_cache[id(peek_node)] = self._compute_balanced_subtree_hash(doc_hashes)
+                        else:
+                            # Internal - combine children
+                            left_hash = node_hash_cache.get(id(peek_node.left), keccak(b'').hex()) if peek_node.left else keccak(b'').hex()
+                            right_hash = node_hash_cache.get(id(peek_node.right), keccak(b'').hex()) if peek_node.right else keccak(b'').hex()
+                            node_hash_cache[id(peek_node)] = combine_and_hash(left_hash, right_hash)
+                        
+                        stack.pop()
+                        last_visited = peek_node
+                        current = None
+        
+        build_hash_cache(self.property_huffman_root)
+        
+        # Use iterative post-order traversal to generate path instructions
+        def generate_path_instructions_iterative(root):
+            nonlocal next_computed_idx
+            
+            if root is None:
+                return None
+            
+            stack = []
+            node_index_map = {}  # Maps node id to its working set index
+            last_visited = None
+            current = root
+            
+            while stack or current:
+                # Go to leftmost node
+                if current:
+                    stack.append(current)
+                    current = current.left
+                else:
+                    peek_node = stack[-1]
+                    
+                    # If right child exists and hasn't been processed yet
+                    if peek_node.right and last_visited != peek_node.right:
+                        current = peek_node.right
+                    else:
+                        # Process this node
+                        node_id = id(peek_node)
+                        
+                        # If this is a property node (leaf), check if any of its documents are requested
+                        if peek_node.property_group is not None:
+                            if peek_node.property_group.optimized_document_order:
+                                # Check if any documents from this property are in the requested set
+                                property_docs = peek_node.property_group.optimized_document_order
+                                requested_docs = [doc for doc in property_docs if doc.hash_hex in working_set_indices]
+                                
+                                # If this property has requested documents, we need to handle the subtree
+                                # For now, mark the property node with the index of its first requested document
+                                # (This is a simplified approach; full implementation would need subtree proof generation)
+                                if requested_docs:
+                                    # Use first requested document's index as placeholder
+                                    node_index_map[node_id] = working_set_indices[requested_docs[0].hash_hex]
+                        else:
+                            # Internal node - use pre-computed hash from cache
+                            node_hash = node_hash_cache.get(node_id)
+                            
+                            if node_hash is None:
+                                # This shouldn't happen if cache was built correctly
+                                continue
+                            
+                            # If this node is already in working set (as proof hash), use its index
+                            if node_hash in working_set_indices:
+                                node_index_map[node_id] = working_set_indices[node_hash]
+                            # If already computed, use its index
+                            elif node_hash in computed_hashes:
+                                node_index_map[node_id] = computed_hashes[node_hash]
+                            else:
+                                # Need to compute this node from children
+                                left_idx = node_index_map.get(id(peek_node.left)) if peek_node.left else None
+                                right_idx = node_index_map.get(id(peek_node.right)) if peek_node.right else None
+                                
+                                if left_idx is not None and right_idx is not None:
+                                    # Add instruction to pathMap
+                                    path_map.extend([left_idx, right_idx])
+                                    # Record this computed index
+                                    computed_hashes[node_hash] = next_computed_idx
+                                    node_index_map[node_id] = next_computed_idx
+                                    next_computed_idx += 1
+                        
+                        stack.pop()
+                        last_visited = peek_node
+                        current = None
+            
+            return node_index_map.get(id(root))
+        
+        # Generate instructions starting from root
+        generate_path_instructions_iterative(self.property_huffman_root)
         
         return {
             'leaves': leaves,
@@ -1076,17 +1668,44 @@ class TraditionalPropertyLevelHuffmanBuilder:
         }
     
     def _get_descendants(self, node):
-        """Get all property node descendants of a node."""
+        """Get all property node descendants of a node - iterative version."""
         if node is None:
             return set()
         
         if node.property_group is not None:
             return {node}
         
-        descendants = set()
-        descendants.update(self._get_descendants(node.left))
-        descendants.update(self._get_descendants(node.right))
-        return descendants
+        # Iterative post-order traversal
+        descendants_map = {}
+        stack = []
+        last_visited = None
+        current = node
+        
+        while stack or current:
+            if current:
+                stack.append(current)
+                current = current.left
+            else:
+                peek_node = stack[-1]
+                if peek_node.right and last_visited != peek_node.right:
+                    current = peek_node.right
+                else:
+                    # Process this node
+                    if peek_node.property_group is not None:
+                        descendants_map[id(peek_node)] = {peek_node}
+                    else:
+                        descendants = set()
+                        if peek_node.left:
+                            descendants.update(descendants_map.get(id(peek_node.left), set()))
+                        if peek_node.right:
+                            descendants.update(descendants_map.get(id(peek_node.right), set()))
+                        descendants_map[id(peek_node)] = descendants
+                    
+                    stack.pop()
+                    last_visited = peek_node
+                    current = None
+        
+        return descendants_map.get(id(node), set())
     
     def generate_multiproof(self, leaves_to_prove_hex):
         """Generate multiproof using new pathMap format."""

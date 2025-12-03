@@ -49,12 +49,61 @@ class TransactionalPattern:
             frequencies[doc] = base_frequency  # Use document object as key
         return frequencies
     
-    def get_province_zipfian_weights(self, properties: list) -> dict:
+    def get_property_access_frequencies(self, province_property_groups: dict) -> dict:
         """
-        Stage 1: Generate Zipfian-distributed weights for province selection.
-        Creates outer Zipfian distribution across provinces based on economic importance.
+        Calculate property-level access frequencies based on Zipfian distribution
+        for transactional queries. This is used to train pairs-first Huffman.
         
-        Returns dict mapping province -> (zipfian_weight, properties_in_province)
+        Args:
+            province_property_groups: dict mapping province -> {property_id -> PropertyDocumentGroup}
+        
+        Returns:
+            dict mapping full_property_id (e.g., "JAWA BARAT.12345") -> access_frequency
+        """
+        property_frequencies = {}
+        
+        # For each province, calculate Zipfian-distributed frequencies for its properties
+        for province, property_groups in province_property_groups.items():
+            if not property_groups:
+                continue
+            
+            # Calculate property importance scores within province
+            property_scores = []
+            for prop_id, group in property_groups.items():
+                # Score based on document portfolio value
+                doc_score = sum(self.document_importance_map.get(doc.doc_type, 1) 
+                               for doc in group.documents)
+                property_scores.append((province, prop_id, group, doc_score))
+            
+            # Sort properties by importance (descending) for Zipfian ranking
+            sorted_properties = sorted(property_scores, key=lambda x: x[3], reverse=True)
+            
+            # Generate Zipfian probabilities for properties
+            zipf_weights = []
+            for rank, (prov, prop_id, group, score) in enumerate(sorted_properties, 1):
+                zipf_prob = 1.0 / (rank ** self.property_zipf_parameter)
+                zipf_weights.append(zipf_prob)
+            
+            # Normalize to sum to 1.0 within province
+            total_weight = sum(zipf_weights)
+            normalized_weights = [w / total_weight for w in zipf_weights]
+            
+            # Convert to frequencies (scale up for integer counts)
+            # Using 1000 as base scale to get reasonable frequency values
+            base_frequency_scale = 1000
+            for (prov, prop_id, group, score), norm_weight in zip(sorted_properties, normalized_weights):
+                full_prop_id = f"{prov}.{prop_id}"
+                # Frequency is proportional to Zipfian probability
+                property_frequencies[full_prop_id] = int(norm_weight * base_frequency_scale)
+        
+        return property_frequencies
+    
+    def get_province_uniform_weights(self, properties: list) -> dict:
+        """
+        Stage 1: Generate UNIFORM weights for province selection.
+        All provinces have equal probability of being selected.
+        
+        Returns dict mapping province -> (uniform_weight, properties_in_province)
         """
         if not properties:
             return {}
@@ -66,40 +115,9 @@ class TransactionalPattern:
                 province_groups[prop.province] = []
             province_groups[prop.province].append(prop)
         
-        if not self.use_property_zipfian:
-            # Uniform distribution (legacy behavior)
-            uniform_weight = 1.0 / len(province_groups)
-            return {province: (uniform_weight, props) for province, props in province_groups.items()}
-        
-        # Calculate provincial importance scores
-        province_scores = []
-        for province, props in province_groups.items():
-            # Provincial score = location bonus + total document portfolio value
-            location_bonus = self._get_location_importance_bonus(province)
-            portfolio_score = sum(
-                sum(self.document_importance_map.get(doc.doc_type, 1) for doc in prop.documents)
-                for prop in props
-            )
-            total_score = location_bonus * len(props) + portfolio_score  # Scale location by property count
-            province_scores.append((province, total_score, props))
-        
-        # Sort provinces by importance (descending) for Zipfian ranking
-        sorted_provinces = sorted(province_scores, key=lambda x: x[1], reverse=True)
-        
-        # Generate Zipfian probabilities for provinces (Stage 1 - Outer Zipfian)
-        province_weights = {}
-        for rank, (province, score, props) in enumerate(sorted_provinces, 1):
-            zipf_prob = 1.0 / (rank ** self.property_zipf_parameter)  # Use same parameter for consistency
-            province_weights[province] = (zipf_prob, props)
-        
-        # Normalize provincial probabilities
-        total_weight = sum(weight for weight, _ in province_weights.values())
-        normalized_weights = {
-            province: (weight / total_weight, props) 
-            for province, (weight, props) in province_weights.items()
-        }
-        
-        return normalized_weights
+        # UNIFORM distribution for all provinces (rigorous scientific approach)
+        uniform_weight = 1.0 / len(province_groups)
+        return {province: (uniform_weight, props) for province, props in province_groups.items()}
 
     def get_within_province_zipfian_weights(self, properties_in_province: list) -> list:
         """
@@ -417,19 +435,38 @@ class AuditPattern:
                 total_remaining_weight = sum(remaining_weights)
                 remaining_weights = [w / total_remaining_weight for w in remaining_weights]
         
-        # Return selected properties
-        return [properties_in_province[i] for i in selected_indices]
     
-    def get_national_audit_zipfian_sample(self, properties_by_province: dict,
-                                        document_importance_map: dict,
+    def get_regional_audit_uniform_sample(self, properties_in_province: list) -> list:
+        """
+        Selects properties within a province using UNIFORM distribution.
+        Rigorous scientific approach: all properties equally likely in audit.
+        
+        Args:
+            properties_in_province: List of Property objects in the selected province
+            
+        Returns:
+            List of selected Property objects using uniform random sampling
+        """
+        if not properties_in_province:
+            return []
+        
+        sample_size = self.get_audit_sample_size()
+        
+        # If we need all or more properties than available, return all
+        if sample_size >= len(properties_in_province):
+            return properties_in_province
+        
+        # UNIFORM random sampling without replacement
+        return random.sample(properties_in_province, sample_size)
+    
+    def get_national_audit_uniform_sample(self, properties_by_province: dict,
                                         num_provinces_to_sample: int = 5) -> list:
         """
-        Selects properties from multiple provinces for national audit using Zipfian distribution.
-        Uses α = 0.5 for fair sampling within each selected province.
+        Selects properties from multiple provinces for national audit using UNIFORM distribution.
+        Rigorous scientific approach: all provinces and properties equally likely.
         
         Args:
             properties_by_province: Dict mapping province names to lists of Property objects
-            document_importance_map: Map of document types to importance scores  
             num_provinces_to_sample: Number of provinces to include in national audit
             
         Returns:
@@ -438,7 +475,7 @@ class AuditPattern:
         if len(self.provinces) < num_provinces_to_sample:
             selected_provinces = self.provinces
         else:
-            # Select distinct provinces using weighted selection (economic importance)
+            # UNIFORM province selection
             selected_provinces = random.sample(self.provinces, num_provinces_to_sample)
 
         final_sampled_properties = []
@@ -452,62 +489,13 @@ class AuditPattern:
             if not props_in_province:
                 continue
             
-            # Use Zipfian sampling within each province (α = 0.5 for fairness)
+            # UNIFORM property sampling within each province
             if len(props_in_province) <= properties_per_province:
-                # Take all properties if we need more than available
+                # Take all properties if sample size is larger
                 final_sampled_properties.extend(props_in_province)
             else:
-                # Create a temporary AuditPattern for this province sampling
-                temp_sample_size = properties_per_province
-                
-                # Calculate property importance scores for ranking
-                property_scores = []
-                for i, prop in enumerate(props_in_province):
-                    doc_score = sum(document_importance_map.get(doc.doc_type, 1) 
-                                   for doc in prop.documents)
-                    property_scores.append((i, doc_score))
-                
-                # Sort properties by importance (descending) for Zipfian ranking
-                sorted_property_scores = sorted(property_scores, key=lambda x: x[1], reverse=True)
-                
-                # Create rank mapping and apply Zipfian (α = 0.5)
-                rank_mapping = {}
-                for rank, (prop_index, score) in enumerate(sorted_property_scores, 1):
-                    rank_mapping[prop_index] = rank
-                
-                zipf_alpha = 0.5  # Fair sampling for national audits
-                weights = []
-                for i in range(len(props_in_province)):
-                    rank = rank_mapping[i]
-                    zipf_prob = 1.0 / (rank ** zipf_alpha)
-                    weights.append(zipf_prob)
-                
-                # Normalize and sample
-                total_weight = sum(weights)
-                normalized_weights = [w / total_weight for w in weights]
-                
-                # Sample without replacement
-                selected_indices = []
-                remaining_properties = list(range(len(props_in_province)))
-                remaining_weights = normalized_weights.copy()
-                
-                for _ in range(temp_sample_size):
-                    if not remaining_properties:
-                        break
-                        
-                    selected_idx = random.choices(remaining_properties, weights=remaining_weights, k=1)[0]
-                    selected_indices.append(selected_idx)
-                    
-                    # Remove and renormalize
-                    removal_pos = remaining_properties.index(selected_idx)
-                    remaining_properties.pop(removal_pos)
-                    remaining_weights.pop(removal_pos)
-                    
-                    if remaining_weights:
-                        total_remaining_weight = sum(remaining_weights)
-                        remaining_weights = [w / total_remaining_weight for w in remaining_weights]
-                
-                # Add selected properties from this province
-                final_sampled_properties.extend([props_in_province[i] for i in selected_indices])
+                # Uniform random sampling without replacement
+                sampled = random.sample(props_in_province, properties_per_province)
+                final_sampled_properties.extend(sampled)
         
         return final_sampled_properties

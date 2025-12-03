@@ -90,20 +90,20 @@ class WorkloadGenerator:
 
     def generate_transactional_workload(self, num_queries: int) -> list[Query]:
         """
-        Generates a transactional workload using hierarchical Zipfian distribution.
+        Generates a transactional workload using scientifically rigorous distribution.
         
         TRANSACTIONAL PATTERN: Choose ONE property, query MULTIPLE documents within that property
         
         Two-stage sampling process:
-        Stage 1: Provincial Access Frequency (Outer Zipfian) - Select province
-        Stage 2: Within-Province Property Selection (Inner Zipfian) - Select property in province
+        Stage 1: Provincial Selection (UNIFORM) - All provinces equally likely
+        Stage 2: Within-Province Property Selection (ZIPFIAN) - Frequent properties preferred
         """
         # Set seed for reproducible transactional workload
         random.seed(self.random_seed)
         queries = []
         
-        # Stage 1: Get provincial-level Zipfian weights (Outer Zipfian)
-        province_weights_map = self.transactional_pattern.get_province_zipfian_weights(self.properties)
+        # Stage 1: Get UNIFORM provincial weights (rigorous scientific approach)
+        province_weights_map = self.transactional_pattern.get_province_uniform_weights(self.properties)
         
         # Prepare for Stage 1 sampling
         provinces_list = list(province_weights_map.keys())
@@ -229,6 +229,7 @@ class WorkloadGenerator:
         Generates a geographically-focused REGIONAL audit workload.
         
         REGIONAL AUDIT PATTERN: Choose ONE OR MORE properties within SAME province
+        Uses UNIFORM selection for both province and property (rigorous scientific approach)
         """
         # Set seed for reproducible regional audit workload  
         random.seed(self.random_seed + 1)  # Use offset to ensure different from transactional
@@ -240,18 +241,17 @@ class WorkloadGenerator:
             # Select a specific document type to audit
             target_doc_type = random.choice(self._available_doc_types)
             
-            # Select a single province for this regional audit
+            # Select a single province for this regional audit (UNIFORM selection)
             target_province = self.audit_pattern.get_random_audit_region()
             
             properties_in_province = self._province_map.get(target_province, [])
             if not properties_in_province:
                 continue
 
-            # Sample multiple properties within this single province using Zipfian (α = 0.5)
-            # This creates more fair/balanced selection compared to transactional queries
-            sampled_properties = self.audit_pattern.get_regional_audit_zipfian_sample(
-                properties_in_province, 
-                self.transactional_pattern.document_importance_map
+            # Sample multiple properties within this single province using UNIFORM distribution
+            # Rigorous scientific approach: audits don't favor any property
+            sampled_properties = self.audit_pattern.get_regional_audit_uniform_sample(
+                properties_in_province
             )
             
             # Collect documents of target type from ALL sampled properties in the province
@@ -273,6 +273,7 @@ class WorkloadGenerator:
         Generates a cross-province NATIONAL audit workload (stress test).
         
         NATIONAL AUDIT PATTERN: Choose ONE OR MORE properties across MULTIPLE provinces
+        Uses UNIFORM selection for both provinces and properties (rigorous scientific approach)
         """
         # Set seed for reproducible national audit workload
         random.seed(self.random_seed + 2)  # Use offset to ensure different sequence
@@ -284,10 +285,10 @@ class WorkloadGenerator:
             # Select a specific document type to audit nationally
             target_doc_type = random.choice(self._available_doc_types)
             
-            # Sample properties from MULTIPLE provinces using Zipfian (α = 0.5) within each province
-            sampled_properties = self.audit_pattern.get_national_audit_zipfian_sample(
-                self._province_map,
-                self.transactional_pattern.document_importance_map
+            # Sample properties from MULTIPLE provinces using UNIFORM distribution
+            # Rigorous scientific approach: audits don't favor any province or property
+            sampled_properties = self.audit_pattern.get_national_audit_uniform_sample(
+                self._province_map
             )
 
             # Collect documents of target type from properties across ALL provinces

@@ -1755,8 +1755,21 @@ class TestRunner:
                 for alpha_key, alpha_result in approach_data.items():
                     if alpha_key.startswith("alpha_"):
                         alpha = alpha_result['alpha']
+                        
+                        # Calculate average proof size and verification time from query_results
+                        query_results = alpha_result.get('query_results', [])
+                        avg_proof_size = 0
+                        avg_verification_time = 0
+                        if query_results:
+                            total_proof_size = sum(q.get('proof_size', 0) for q in query_results)
+                            total_verification_time = sum(q.get('verification_time', 0) for q in query_results)
+                            avg_proof_size = total_proof_size / len(query_results)
+                            avg_verification_time = total_verification_time / len(query_results)
+                        
                         approach_summary['results_by_alpha'][alpha] = {
                             'average_gas_per_query': alpha_result['average_gas_per_query'],
+                            'average_proof_size': avg_proof_size,
+                            'average_verification_time': avg_verification_time,
                             'build_time': alpha_result['build_time'],
                             'success_rate': (alpha_result['successful_verifications'] / alpha_result['total_queries'] * 100) if alpha_result['total_queries'] > 0 else 0
                         }
