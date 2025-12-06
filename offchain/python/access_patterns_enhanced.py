@@ -15,8 +15,9 @@ class TransactionalPattern:
     based on a weighted map of document importance.
     """
     def __init__(self, document_importance_map: dict[str, int], alpha_threshold: float = 0.3, 
-                 use_zipfian: bool = True, zipf_parameter: float = 1.2,
-                 use_property_zipfian: bool = True, property_zipf_parameter: float = 1.1,
+                 use_zipfian: bool = True, zipf_parameter: float = 1.05,
+                 use_property_zipfian: bool = True, property_zipf_parameter: float = 1.05,
+                 multi_property_ratio: float = 0.25,  # 25% of transactions involve multiple properties
                  random_seed: int = PATTERN_SEED):
         """
         Args:
@@ -27,6 +28,7 @@ class TransactionalPattern:
             zipf_parameter: Zipfian distribution parameter (1.0-2.0, higher = more skewed)
             use_property_zipfian: Whether to use Zipfian distribution for property selection
             property_zipf_parameter: Zipfian parameter for property-level distribution (typically lower than document-level)
+            multi_property_ratio: Fraction of transactions that involve 2-3 properties (bundle deals, adjacent lots)
         """
         self.document_importance_map = document_importance_map
         self.alpha_threshold = alpha_threshold
@@ -34,7 +36,12 @@ class TransactionalPattern:
         self.zipf_parameter = zipf_parameter
         self.use_property_zipfian = use_property_zipfian
         self.property_zipf_parameter = property_zipf_parameter
+        self.multi_property_ratio = multi_property_ratio
         self.random_seed = random_seed
+        
+        # Track property pairs from multi-property transactions
+        self._property_pair_counts = Counter()
+        self._property_access_counts = Counter()
     
     def get_document_frequencies(self, documents: list) -> dict:
         """
@@ -118,6 +125,86 @@ class TransactionalPattern:
         # UNIFORM distribution for all provinces (rigorous scientific approach)
         uniform_weight = 1.0 / len(province_groups)
         return {province: (uniform_weight, props) for province, props in province_groups.items()}
+    
+    def get_property_frequencies_for_query(self, province_property_groups: dict) -> dict:
+        """
+        Get the SAME property frequencies used for tree building.
+        This ensures queries follow the exact same distribution as the traffic pattern.
+        
+        Returns dict mapping property object -> frequency weight
+        """
+        # Use the same calculation as get_property_access_frequencies
+        # but return property objects as keys for direct use in query generation
+        property_weights = {}
+        
+        for province, property_groups in province_property_groups.items():
+            if not property_groups:
+                continue
+            
+            # Calculate property importance scores within province
+            property_scores = []
+            for prop_id, group in property_groups.items():
+                # Score based on document portfolio value (same as tree building)
+                doc_score = sum(self.document_importance_map.get(doc.doc_type, 1) 
+                               for doc in group.documents)
+                property_scores.append((group, doc_score))
+            
+            # Sort properties by importance (descending) for Zipfian ranking
+            sorted_properties = sorted(property_scores, key=lambda x: x[1], reverse=True)
+            
+            # Generate Zipfian probabilities (same formula as tree building)
+            zipf_weights = []
+            for rank in range(1, len(sorted_properties) + 1):
+                zipf_prob = 1.0 / (rank ** self.property_zipf_parameter)
+                zipf_weights.append(zipf_prob)
+            
+            # Normalize within province
+            total_weight = sum(zipf_weights)
+            
+            # Store weights for each property group
+            for (group, score), weight in zip(sorted_properties, zipf_weights):
+                normalized_weight = weight / total_weight if total_weight > 0 else 0
+                property_weights[group] = normalized_weight
+        
+        return property_weights
+    
+    def get_global_property_zipfian_weights(self, properties: list) -> tuple[list, list]:
+        """
+        Generate GLOBAL Zipfian-distributed weights for property selection.
+        
+        This uses the SAME distribution as get_property_access_frequencies() used
+        for tree building, ensuring the workload reflects the traffic pattern.
+        
+        Returns:
+            tuple of (properties_list, weights_list) where weights follow global Zipfian
+        """
+        if not properties:
+            return [], []
+        
+        # Calculate property importance scores globally
+        property_scores = []
+        for prop in properties:
+            # Score based on document portfolio value (same as tree building)
+            doc_score = sum(self.document_importance_map.get(doc.doc_type, 1) 
+                           for doc in prop.documents)
+            property_scores.append((prop, doc_score))
+        
+        # Sort properties by importance (descending) for Zipfian ranking
+        sorted_properties = sorted(property_scores, key=lambda x: x[1], reverse=True)
+        
+        # Generate Zipfian probabilities (same formula as tree building)
+        zipf_weights = []
+        for rank in range(1, len(sorted_properties) + 1):
+            weight = 1.0 / (rank ** self.zipf_parameter)
+            zipf_weights.append(weight)
+        
+        # Normalize weights
+        total = sum(zipf_weights)
+        zipf_weights = [w / total for w in zipf_weights]
+        
+        # Return properties and weights in sorted order
+        properties_list = [prop for prop, _ in sorted_properties]
+        return properties_list, zipf_weights
 
     def get_within_province_zipfian_weights(self, properties_in_province: list) -> list:
         """
@@ -251,6 +338,144 @@ class TransactionalPattern:
                     pruned_pair_counter[pair] = count
 
         return pruned_pair_counter
+    
+    def record_property_access(self, property_ids: list):
+        """
+        Record property accesses from a query. Called by WorkloadGenerator.
+        
+        Args:
+            property_ids: List of full property IDs (e.g., ["JAWA BARAT.prop_123", "JAWA BARAT.prop_456"])
+        """
+        for prop_id in property_ids:
+            self._property_access_counts[prop_id] += 1
+        
+        # If multiple properties in the same query, record the pairs
+        if len(property_ids) >= 2:
+            for pair in combinations(property_ids, 2):
+                sorted_pair = tuple(sorted(pair))
+                self._property_pair_counts[sorted_pair] += 1
+    
+    def get_property_pair_frequencies(self) -> dict:
+        """
+        Returns the cross-property pair frequencies from multi-property transactions.
+        These are used for pairs-first Huffman optimization at the property level.
+        
+        Returns:
+            dict mapping (prop1_id, prop2_id) -> co-access frequency
+        """
+        return dict(self._property_pair_counts)
+    
+    def get_recorded_property_frequencies(self) -> dict:
+        """
+        Returns the property access frequencies recorded from actual queries.
+        
+        Returns:
+            dict mapping prop_id -> access count
+        """
+        return dict(self._property_access_counts)
+    
+    def simulate_multi_property_transactions(self, province_property_groups: dict, 
+                                             num_simulations: int = 1000) -> dict:
+        """
+        Simulate multi-property transactions to generate property pair frequencies
+        for pairs-first Huffman training. This is used during tree building.
+        
+        OPTIMIZED: Pre-computes Zipfian weights per province to avoid repeated calculations.
+        
+        Multi-property transactions are common in:
+        - Adjacent property deals (boundary verification)
+        - Bundle transactions (house + parking lot)
+        - Development projects (multiple lots)
+        - Inheritance/estate settlements
+        
+        Args:
+            province_property_groups: dict mapping province -> {property_id -> PropertyDocumentGroup}
+            num_simulations: Number of transactions to simulate
+        
+        Returns:
+            dict mapping (prop1_id, prop2_id) -> pair frequency
+        """
+        random.seed(self.random_seed)
+        pair_counts = Counter()
+        
+        # Convert to list for easier access
+        province_list = list(province_property_groups.keys())
+        if not province_list:
+            return {}
+        
+        # PRE-COMPUTE: Calculate Zipfian weights for each province ONCE
+        province_weights_cache = {}
+        for province, property_groups in province_property_groups.items():
+            if len(property_groups) < 2:
+                continue  # Skip provinces with < 2 properties
+            
+            # Calculate property scores
+            property_scores = []
+            for prop_id, group in property_groups.items():
+                doc_score = sum(self.document_importance_map.get(doc.doc_type, 1) 
+                               for doc in group.documents)
+                property_scores.append((prop_id, doc_score))
+            
+            sorted_properties = sorted(property_scores, key=lambda x: x[1], reverse=True)
+            
+            # Generate Zipfian weights
+            n = len(sorted_properties)
+            zipf_weights = [1.0 / (rank ** self.property_zipf_parameter) for rank in range(1, n + 1)]
+            total_weight = sum(zipf_weights)
+            normalized_weights = [w / total_weight for w in zipf_weights]
+            
+            property_ids = [p[0] for p in sorted_properties]
+            
+            province_weights_cache[province] = (property_ids, normalized_weights)
+        
+        # Filter to provinces with valid weights
+        valid_provinces = list(province_weights_cache.keys())
+        if not valid_provinces:
+            return {}
+        
+        # Run simulations using pre-computed weights
+        for _ in range(num_simulations):
+            # Check if this should be a multi-property transaction
+            if random.random() >= self.multi_property_ratio:
+                continue  # Skip - this would be a single-property transaction
+            
+            # Select a province (uniform for multi-property deals)
+            province = random.choice(valid_provinces)
+            property_ids, normalized_weights = province_weights_cache[province]
+            
+            # Select 2-3 properties for multi-property transaction
+            num_props = random.choice([2, 2, 2, 3])  # 75% two properties, 25% three
+            num_props = min(num_props, len(property_ids))
+            
+            # Weighted selection (popular properties more likely in bundle deals)
+            # Use numpy for faster weighted sampling without replacement
+            selected_indices = []
+            remaining_indices = list(range(len(property_ids)))
+            remaining_weights = normalized_weights.copy()
+            
+            for _ in range(num_props):
+                if not remaining_indices:
+                    break
+                idx = random.choices(remaining_indices, weights=remaining_weights, k=1)[0]
+                selected_indices.append(idx)
+                
+                pos = remaining_indices.index(idx)
+                remaining_indices.pop(pos)
+                remaining_weights.pop(pos)
+                
+                if remaining_weights:
+                    total = sum(remaining_weights)
+                    remaining_weights = [w / total for w in remaining_weights]
+            
+            # Get full property IDs and record pairs
+            selected_prop_ids = [f"{province}.{property_ids[i]}" for i in selected_indices]
+            
+            if len(selected_prop_ids) >= 2:
+                for pair in combinations(selected_prop_ids, 2):
+                    sorted_pair = tuple(sorted(pair))
+                    pair_counts[sorted_pair] += 1
+        
+        return dict(pair_counts)
 
 # --- ADD THE NEW AUDIT PATTERN CLASS ---
 class AuditPattern:

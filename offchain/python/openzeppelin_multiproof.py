@@ -9,8 +9,14 @@ to ensure compatibility with the smart contract verification.
 from eth_utils import keccak
 
 def combine_and_hash(left, right):
-    """Combine two hashes using keccak256."""
-    return keccak(bytes.fromhex(left) + bytes.fromhex(right)).hex()
+    """Combine two hashes using keccak256 with sorted ordering (OpenZeppelin compatible)."""
+    left_bytes = bytes.fromhex(left)
+    right_bytes = bytes.fromhex(right)
+    # Sort hashes to ensure deterministic ordering (matches tree builder)
+    if left_bytes < right_bytes:
+        return keccak(left_bytes + right_bytes).hex()
+    else:
+        return keccak(right_bytes + left_bytes).hex()
 
 def generate_multiproof_openzeppelin(leaves, leaf_indices, tree_layers):
     """
@@ -19,18 +25,23 @@ def generate_multiproof_openzeppelin(leaves, leaf_indices, tree_layers):
     This implements the exact algorithm from OpenZeppelin's source code.
     
     Args:
-        leaves: List of leaf hashes
+        leaves: List of leaf hashes (full tree leaves)
         leaf_indices: List of indices of leaves to prove
         tree_layers: List of tree layers (leaves, level1, level2, ..., root)
     
     Returns:
-        tuple: (proof, proof_flags) where proof_flags has exactly leaves.length + proof.length - 1 elements
+        tuple: (proof, proof_flags, leaves_in_order) where:
+            - proof_flags has exactly leaves.length + proof.length - 1 elements
+            - leaves_in_order is the leaves in the order expected by verification
     """
     if not leaf_indices:
-        return [], []
+        return [], [], []
     
-    # Sort leaf indices to ensure consistent ordering
+    # Sort leaf indices by tree position to ensure consistent ordering
     sorted_indices = sorted(leaf_indices)
+    
+    # Get leaves in tree-index order (this is the order verification expects!)
+    leaves_in_order = [tree_layers[0][i] for i in sorted_indices]
     
     # Track which nodes are in the proof path
     in_proof_path = set()
@@ -85,7 +96,7 @@ def generate_multiproof_openzeppelin(leaves, leaf_indices, tree_layers):
             # Pad with False if too short
             proof_flags.extend([False] * (expected_flags_len - len(proof_flags)))
     
-    return proof, proof_flags
+    return proof, proof_flags, leaves_in_order
 
 def build_tree_layers(leaves):
     """Build tree layers from leaves."""

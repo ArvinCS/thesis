@@ -3,6 +3,8 @@ Traditional Multiproof Merkle Tree Builder
 
 This module provides a traditional flat Merkle tree implementation with multiproof
 generation for comparison against hierarchical approaches.
+
+Uses OpenZeppelin-compatible multiproof format for balanced trees.
 """
 
 import random
@@ -57,48 +59,60 @@ class TraditionalMerkleTreeBuilder:
         return self.generate_batched_proof_with_flags(document_hashes)
     
     def generate_batched_proof_with_flags(self, leaves_to_prove_hex):
-        """Generate multiproof using the correct OpenZeppelin-compatible algorithm."""
+        """
+        Generate multiproof using the correct OpenZeppelin-compatible algorithm.
+        
+        Returns:
+            tuple: (proof, proof_flags, leaves_in_order) where leaves_in_order
+                   is the leaves in the exact order expected by verification.
+        """
         if not self.ordered_leaves_hex:
-            return [], []
+            return [], [], []
         
         # Use the working algorithm from optimized_tree_builder
         # This ensures compatibility with OpenZeppelin's multiproof format
         return self._generate_multiproof_openzeppelin_compatible(leaves_to_prove_hex)
     
     def generate_multiproof(self, leaves_to_prove_hex):
-        """Generate multiproof using new pathMap format."""
-        proof_data = self.generate_pathmap_proof(leaves_to_prove_hex)
-        return proof_data['proofHashes'], proof_data['pathMap']
+        """
+        Generate multiproof using OpenZeppelin-compatible format for balanced trees.
+        
+        Returns:
+            tuple: (proof, proof_flags, leaves_in_order) where leaves_in_order
+                   is the leaves in the exact order expected by verification.
+        """
+        return self._generate_multiproof_openzeppelin_compatible(leaves_to_prove_hex)
     
     def _generate_multiproof_openzeppelin_compatible(self, leaves_to_prove_hex):
         """Generate multiproof compatible with OpenZeppelin's multiProofVerify."""
-        from openzeppelin_multiproof import generate_multiproof_openzeppelin, build_tree_layers
+        from openzeppelin_multiproof import generate_multiproof_openzeppelin
         
         if not leaves_to_prove_hex:
-            return [], []
+            return [], [], []
         
-        # Sort leaves to ensure consistent ordering
-        # Ensure uniqueness to avoid duplicated leaves in multiproof
-        sorted_leaves = sorted(set(leaves_to_prove_hex))
+        # Remove duplicates while preserving order
+        unique_leaves = list(set(leaves_to_prove_hex))
         
-        # Find indices of leaves to prove
+        # Find indices of leaves to prove in the tree
         leaf_indices = []
-        for leaf in sorted_leaves:
+        for leaf in unique_leaves:
             if leaf in self.ordered_leaves_hex:
                 leaf_indices.append(self.ordered_leaves_hex.index(leaf))
         
         if not leaf_indices:
-            return [], []
+            return [], [], []
         
-        # Build the tree layers
-        tree_layers = build_tree_layers(self.ordered_leaves_hex)
+        # Use the stored tree layers (already built in self.build())
+        # This ensures consistency with how the tree was originally built
+        tree_layers = self.layers
         
         # Generate multiproof using the correct OpenZeppelin algorithm
-        proof, proof_flags = generate_multiproof_openzeppelin(
+        # This returns proof, flags, AND the leaves in the correct order for verification
+        proof, proof_flags, leaves_in_order = generate_multiproof_openzeppelin(
             self.ordered_leaves_hex, leaf_indices, tree_layers
         )
         
-        return proof, proof_flags
+        return proof, proof_flags, leaves_in_order
     
     def generate_pathmap_proof(self, leaves_to_prove_hex):
         """Generate proof using new pathMap format for bottom-up reconstruction."""

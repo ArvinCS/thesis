@@ -68,6 +68,10 @@ class WorkloadGenerator:
         self._available_doc_types = list(self._doc_type_map.keys())
         self._property_map = {p.property_id: p for p in self.properties}
         self._province_map = self._build_province_map()
+        
+        # Pre-calculate property frequencies from traffic pattern for weighted random selection
+        # This ensures queries follow the SAME distribution used to build the tree
+        self._property_frequencies_by_province = self._build_property_frequencies()
 
     def _build_province_map(self) -> dict[str, list]:
         """Helper to group properties by province for fast lookups."""
@@ -76,6 +80,52 @@ class WorkloadGenerator:
             if prop.province in province_map:
                 province_map[prop.province].append(prop)
         return province_map
+    
+    def _build_property_frequencies(self) -> dict[str, list]:
+        """
+        Pre-calculate property frequencies from traffic pattern.
+        Uses the SAME Zipfian distribution as tree building.
+        
+        Returns dict mapping province -> [(property, frequency_weight), ...]
+        """
+        frequencies_by_province = {}
+        
+        for province, props_in_province in self._province_map.items():
+            if not props_in_province:
+                frequencies_by_province[province] = []
+                continue
+            
+            # Calculate property importance scores (same as traffic pattern)
+            property_scores = []
+            for prop in props_in_province:
+                doc_score = sum(
+                    self.transactional_pattern.document_importance_map.get(doc.doc_type, 1)
+                    for doc in prop.documents
+                )
+                property_scores.append((prop, doc_score))
+            
+            # Sort by importance (descending) for Zipfian ranking
+            sorted_properties = sorted(property_scores, key=lambda x: x[1], reverse=True)
+            
+            # Generate Zipfian weights (same formula as traffic pattern)
+            zipf_param = self.transactional_pattern.property_zipf_parameter
+            zipf_weights = []
+            for rank in range(1, len(sorted_properties) + 1):
+                weight = 1.0 / (rank ** zipf_param)
+                zipf_weights.append(weight)
+            
+            # Normalize within province
+            total = sum(zipf_weights)
+            
+            # Store as list of (property, normalized_weight) tuples
+            province_frequencies = []
+            for (prop, score), weight in zip(sorted_properties, zipf_weights):
+                normalized_weight = weight / total if total > 0 else 0
+                province_frequencies.append((prop, normalized_weight))
+            
+            frequencies_by_province[province] = province_frequencies
+        
+        return frequencies_by_province
     
     def _build_doc_type_map(self) -> dict[str, list[tuple[str, str]]]:
         """Helper to map doc_type to a list of (property_id, doc_id)."""
@@ -90,37 +140,46 @@ class WorkloadGenerator:
 
     def generate_transactional_workload(self, num_queries: int) -> list[Query]:
         """
-        Generates a transactional workload using scientifically rigorous distribution.
+        Generates a transactional workload following the paper's distribution:
         
         TRANSACTIONAL PATTERN: Choose ONE property, query MULTIPLE documents within that property
         
-        Two-stage sampling process:
-        Stage 1: Provincial Selection (UNIFORM) - All provinces equally likely
-        Stage 2: Within-Province Property Selection (ZIPFIAN) - Frequent properties preferred
+        Two-stage sampling process (as specified in the paper):
+        Stage 1: Province Selection - UNIFORM (all provinces equally likely)
+        Stage 2: Within-Province Property Selection - WEIGHTED RANDOM based on traffic pattern
+                 (uses the SAME frequencies that were used to build the Huffman tree)
+        Stage 3: Document Selection - Weighted by document importance
         """
         # Set seed for reproducible transactional workload
         random.seed(self.random_seed)
         queries = []
         
-        # Stage 1: Get UNIFORM provincial weights (rigorous scientific approach)
-        province_weights_map = self.transactional_pattern.get_province_uniform_weights(self.properties)
+        # Stage 1: Prepare UNIFORM provincial weights (as per paper)
+        provinces_with_props = [p for p in self._province_map.keys() if self._province_map[p]]
+        if not provinces_with_props:
+            return queries
         
-        # Prepare for Stage 1 sampling
-        provinces_list = list(province_weights_map.keys())
-        province_weights_list = [weight for weight, _ in province_weights_map.values()]
+        # UNIFORM weights for province selection
+        uniform_weight = 1.0 / len(provinces_with_props)
+        province_weights = [uniform_weight] * len(provinces_with_props)
         
         for _ in range(num_queries):
-            # Stage 1: Select province using Outer Zipfian distribution
-            selected_province = random.choices(provinces_list, weights=province_weights_list, k=1)[0]
+            # Stage 1: Select province using UNIFORM distribution (as per paper)
+            selected_province = random.choices(provinces_with_props, weights=province_weights, k=1)[0]
             
-            # Get properties in the selected province
-            _, properties_in_province = province_weights_map[selected_province]
+            # Get properties and their PRE-CALCULATED frequencies from traffic pattern
+            province_frequencies = self._property_frequencies_by_province.get(selected_province, [])
+            if not province_frequencies:
+                continue
             
-            # Stage 2: Select ONE property within province using Inner Zipfian distribution
-            within_province_weights = self.transactional_pattern.get_within_province_zipfian_weights(properties_in_province)
-            target_property = random.choices(properties_in_province, weights=within_province_weights, k=1)[0]
+            # Stage 2: Select ONE property using WEIGHTED RANDOM based on traffic pattern frequencies
+            # This uses the SAME distribution that was used to build the Huffman tree!
+            properties_list = [prop for prop, _ in province_frequencies]
+            weights_list = [weight for _, weight in province_frequencies]
             
-            # Get the frequency distribution for this property's documents
+            target_property = random.choices(properties_list, weights=weights_list, k=1)[0]
+            
+            # Stage 3: Get the frequency distribution for this property's documents
             doc_frequencies = self.transactional_pattern.get_document_frequencies(target_property.documents)
             
             docs = list(doc_frequencies.keys())  # Document objects

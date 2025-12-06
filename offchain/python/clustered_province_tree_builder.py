@@ -354,9 +354,6 @@ class ClusteredProvinceTreeBuilder:
         flat Merkle tree structure for proof compatibility.
         """
         print("Building Clustered Province Tree (flat with province clustering)...")
-        
-        # Calculate frequencies (still useful for stats)
-        province_freq, property_freq, pair_freq = self._calculate_frequencies()
 
         # Primary sorting: Group by province (alphabetical order for consistency)
         sorted_provinces = sorted(self.province_clusters.keys())
@@ -377,7 +374,8 @@ class ClusteredProvinceTreeBuilder:
             
             end_idx = len(all_document_hashes)
             self.province_boundaries[province] = (start_idx, end_idx)
-            print(f"  Province {province}: docs {start_idx}-{end_idx} ({end_idx - start_idx} total)")
+        
+        print(f"  Organized {len(sorted_provinces)} provinces")
         
         # Set ordered_leaves_hex to document-level hashes (flat structure)
         self.ordered_leaves_hex = all_document_hashes
@@ -412,13 +410,17 @@ class ClusteredProvinceTreeBuilder:
     def generate_multiproof(self, leaves_to_prove_hex):
         """
         Generate optimized multiproof for the flat tree.
-        Returns proof elements and flags for inline Solidity verification.
+        Returns proof elements, flags, and leaves in correct order for verification.
+        
+        Returns:
+            tuple: (proof, proof_flags, leaves_in_order) where leaves_in_order
+                   is the leaves in tree-index order (required for verification).
         """
         if self.merkle_root is None:
             raise ValueError("Tree not built yet")
         
         if not leaves_to_prove_hex:
-            return [], []
+            return [], [], []
         
         # Remove duplicates while preserving order
         unique_leaves = []
@@ -431,11 +433,22 @@ class ClusteredProvinceTreeBuilder:
         # Map leaves to indices
         leaf_indices_map = {leaf: i for i, leaf in enumerate(self.ordered_leaves_hex)}
         
-        # Track nodes that are part of proof path
-        processed_nodes = {}
+        # Get leaf indices and sort by tree position
+        leaf_indices = []
         for leaf in unique_leaves:
             if leaf in leaf_indices_map:
-                processed_nodes[(0, leaf_indices_map[leaf])] = True
+                leaf_indices.append(leaf_indices_map[leaf])
+        
+        # Sort indices by tree position - this is the order verification expects!
+        sorted_indices = sorted(leaf_indices)
+        
+        # Get leaves in tree-index order
+        leaves_in_order = [self.tree_layers[0][i] for i in sorted_indices]
+        
+        # Track nodes that are part of proof path
+        processed_nodes = {}
+        for idx in sorted_indices:
+            processed_nodes[(0, idx)] = True
         
         proof = []
         proof_flags = []
@@ -479,7 +492,7 @@ class ClusteredProvinceTreeBuilder:
                             proof_nodes_seen.add(left_node)
                         proof_flags.append(False)
         
-        return proof, proof_flags
+        return proof, proof_flags, leaves_in_order
     
     def generate_iterative_proofs(self, document_hashes):
         """

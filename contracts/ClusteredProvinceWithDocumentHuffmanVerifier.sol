@@ -39,63 +39,102 @@ contract ClusteredProvinceWithDocumentHuffmanVerifier is Ownable {
     }
 
     /**
-     * @notice Verifies a multiproof using the bottom-up reconstruction method.
-     * @param leaves The leaf hashes being proven, sorted lexicographically off-chain.
-     * @param proofHashes The minimal, de-duplicated set of sibling hashes, sorted.
-     * @param pathMap The "recipe" for rebuilding the tree. An array of pairs of indices.
-     * Each index points to a hash in the combined `leaves` and `proofHashes` array,
-     * or to a previously computed hash.
+     * @notice Verifies a multiproof using optimized bitmap-based stack approach.
+     * @param inputs Combined array of all input hashes (leaves and siblings) in post-order.
+     * @param bitmap Bitmap where each bit controls the operation:
+     *               - bit=1: Push next hash from inputs array onto stack
+     *               - bit=0: Pop two hashes from stack, merge them, push result
      * @return A boolean indicating if the proof is valid.
+     * 
+     * OPTIMIZED VERSION:
+     * - Uses unchecked arithmetic for bounded counters
+     * - Removed redundant early termination check from loop
+     * - Cached merkleRoot to avoid storage read in hot path
+     * - Optimized merge with inline assembly
      */
     function verifyBatch(
-        bytes32[] memory leaves,
-        bytes32[] memory proofHashes,
-        uint256[] memory pathMap
+        bytes32[] memory inputs,
+        uint256[] memory bitmap
     ) public view returns (bool) {
-        require(pathMap.length % 2 == 0, "Invalid path map length");
-
-        // The working set starts with all the known base hashes.
-        uint256 leavesLen = leaves.length;
-        uint256 proofHashesLen = proofHashes.length;
-        uint256 numComputed = pathMap.length / 2;
+        uint256 inputLen = inputs.length;
+        if (inputLen == 0) return false;
+        if (bitmap.length == 0) return false;
         
-        // This array will hold all leaves, all proof hashes, and all hashes we compute.
-        bytes32[] memory workingSet = new bytes32[](leavesLen + proofHashesLen + numComputed);
-
-        // 1. Fill the working set with the known hashes.
-        for (uint i = 0; i < leavesLen; i++) {
-            workingSet[i] = leaves[i];
-        }
-        for (uint i = 0; i < proofHashesLen; i++) {
-            workingSet[leavesLen + i] = proofHashes[i];
-        }
-
-        // 2. Execute the recipe to compute the internal hashes.
-        uint256 computedIndex = leavesLen + proofHashesLen;
-        for (uint i = 0; i < numComputed; i++) {
-            uint256 leftIndex = pathMap[i * 2];
-            uint256 rightIndex = pathMap[i * 2 + 1];
-
-            // The indices in pathMap refer to the full workingSet array.
-            require(leftIndex < computedIndex && rightIndex < computedIndex, "Invalid path map index");
-
-            bytes32 leftHash = workingSet[leftIndex];
-            bytes32 rightHash = workingSet[rightIndex];
-            
-            // Ensure canonical ordering for hashing
-            if (leftHash < rightHash) {
-                 workingSet[computedIndex] = keccak256(abi.encodePacked(leftHash, rightHash));
-            } else {
-                 workingSet[computedIndex] = keccak256(abi.encodePacked(rightHash, leftHash));
+        // Cache storage variable to avoid repeated SLOAD
+        bytes32 expectedRoot = merkleRoot;
+        
+        // Stack to hold intermediate computed hashes
+        bytes32[] memory stack = new bytes32[](inputLen);
+        uint256 stackSize;
+        uint256 inputIndex;
+        
+        // Total operations = pushes + merges = inputs + (inputs - 1) = 2*inputs - 1
+        uint256 totalOps = inputLen * 2 - 1;
+        uint256 bitmapIndex;
+        uint256 bitPosition;
+        uint256 currentWord = bitmap[0];
+        
+        // Use unchecked for bounded arithmetic - these cannot overflow
+        unchecked {
+            for (uint256 op = 0; op < totalOps; op++) {
+                // Get next bit from bitmap
+                bool isPush = (currentWord & (1 << bitPosition)) != 0;
+                
+                if (isPush) {
+                    // Push next input onto stack
+                    stack[stackSize] = inputs[inputIndex];
+                    stackSize++;
+                    inputIndex++;
+                } else {
+                    // Merge: pop two, hash, push result
+                    if (stackSize < 2) return false;
+                    
+                    stackSize--;
+                    bytes32 right = stack[stackSize];
+                    stackSize--;
+                    bytes32 left = stack[stackSize];
+                    
+                    // Canonical ordering and hash using assembly for efficiency
+                    bytes32 merged;
+                    assembly {
+                        // Allocate memory for hashing (64 bytes)
+                        let ptr := mload(0x40)
+                        
+                        // Compare and order: smaller hash goes first
+                        switch lt(left, right)
+                        case 1 {
+                            mstore(ptr, left)
+                            mstore(add(ptr, 32), right)
+                        }
+                        default {
+                            mstore(ptr, right)
+                            mstore(add(ptr, 32), left)
+                        }
+                        
+                        // Compute keccak256
+                        merged := keccak256(ptr, 64)
+                    }
+                    
+                    stack[stackSize] = merged;
+                    stackSize++;
+                }
+                
+                // Advance bit position
+                bitPosition++;
+                
+                // Move to next bitmap word if needed (every 256 bits)
+                if (bitPosition == 256) {
+                    bitPosition = 0;
+                    bitmapIndex++;
+                    if (bitmapIndex < bitmap.length) {
+                        currentWord = bitmap[bitmapIndex];
+                    }
+                }
             }
-            computedIndex++;
         }
-
-        // 3. The final hash computed must be the root.
-        // If the tree is not empty, the last element in the workingSet should be the root.
-        if (workingSet.length == 0) return merkleRoot == keccak256(abi.encodePacked());
         
-        return workingSet[workingSet.length - 1] == merkleRoot;
+        // After processing, stack should have exactly one element: the root
+        return stackSize == 1 && stack[0] == expectedRoot;
     }
 }
 
