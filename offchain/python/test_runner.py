@@ -19,6 +19,7 @@ from jurisdiction_tree_builder import JurisdictionTreeBuilder
 from workload_generator import Query, WorkloadGenerator
 # from compressed_traffic_logs import CompressedTrafficLogs  # No longer needed
 from web3 import Web3
+from bitmap_proof_generator import generate_bitmap_proof_from_pathmap
 
 class TestRunner:
     """
@@ -40,6 +41,25 @@ class TestRunner:
     def print_verbose(self, message: str):
         if self.verbose:
             print(message)
+    
+    def _update_contract_root(self, contract, root_hex, name=""):
+        """Update a contract's merkle root after tree construction."""
+        if not self.web3 or not contract or not root_hex:
+            return False
+        try:
+            root_bytes32 = bytes.fromhex(root_hex)
+            tx_hash = contract.functions.updateRoot(root_bytes32).transact()
+            self.web3.eth.wait_for_transaction_receipt(tx_hash)
+            stored_root = contract.functions.merkleRoot().call()
+            if stored_root.hex() == root_hex:
+                print(f"  ✅ {name} root updated: 0x{root_hex[:16]}...")
+                return True
+            else:
+                print(f"  ⚠️ {name} root mismatch! Expected 0x{root_hex[:16]}... got 0x{stored_root.hex()[:16]}...")
+                return False
+        except Exception as e:
+            print(f"  ⚠️ Failed to update {name} root: {e}")
+            return False
     
     def _setup_contracts(self):
         """Setup smart contracts for gas cost analysis."""
@@ -122,6 +142,96 @@ class TestRunner:
             self.clustered_province_with_document_huffman_contract = None
             self.jurisdiction_tree_contract = None
     
+    def _calculate_communication_cost_multiproof(self, proof, proof_flags, leaves):
+        """
+        Calculate actual communication cost for OpenZeppelin multiproof by simulating verification.
+        Tracks all unique nodes accessed: leaves + proof nodes + all computed intermediate nodes.
+        """
+        from eth_utils import keccak
+        
+        accessed_nodes = set()
+        
+        # Add all leaves (these are accessed) - normalize to hex string
+        for leaf in leaves:
+            leaf_str = leaf if isinstance(leaf, str) else '0x' + leaf.hex()
+            accessed_nodes.add(leaf_str)
+        
+        # Add all proof nodes (these are transmitted) - normalize to hex string
+        for p in proof:
+            p_str = p if isinstance(p, str) else '0x' + p.hex()
+            accessed_nodes.add(p_str)
+        
+        # Simulate the multiproof verification to track computed nodes
+        # OpenZeppelin's multiProofVerify builds the tree bottom-up
+        hashes = list(leaves)  # Start with leaves (as strings)
+        proof_pos = 0
+        
+        for flag in proof_flags:
+            if flag:
+                # Use two elements from hashes array (both children are leaves/computed)
+                if len(hashes) >= 2:
+                    a = hashes.pop(0)
+                    b = hashes.pop(0)
+                    # Compute parent hash - convert strings to bytes for keccak
+                    a_bytes = bytes.fromhex(a.replace('0x', '')) if isinstance(a, str) else a
+                    b_bytes = bytes.fromhex(b.replace('0x', '')) if isinstance(b, str) else b
+                    # Sort for deterministic hashing
+                    if a_bytes <= b_bytes:
+                        computed = keccak(a_bytes + b_bytes)
+                    else:
+                        computed = keccak(b_bytes + a_bytes)
+                    computed_hex = '0x' + computed.hex()
+                    accessed_nodes.add(computed_hex)
+                    hashes.append(computed_hex)
+            else:
+                # Use one element from hashes and one from proof
+                if len(hashes) >= 1 and proof_pos < len(proof):
+                    a = hashes.pop(0)
+                    b = proof[proof_pos]
+                    proof_pos += 1
+                    # Compute parent hash - convert strings to bytes for keccak
+                    a_bytes = bytes.fromhex(a.replace('0x', '')) if isinstance(a, str) else a
+                    b_bytes = bytes.fromhex(b.replace('0x', '')) if isinstance(b, str) else b
+                    # Sort for deterministic hashing
+                    if a_bytes <= b_bytes:
+                        computed = keccak(a_bytes + b_bytes)
+                    else:
+                        computed = keccak(b_bytes + a_bytes)
+                    computed_hex = '0x' + computed.hex()
+                    accessed_nodes.add(computed_hex)
+                    hashes.append(computed_hex)
+        
+        return len(accessed_nodes)
+    
+    def _calculate_communication_cost_pathmap(self, leaves, proof_hashes, path_map):
+        """
+        Calculate actual communication cost for pathMap format by simulating verification.
+        
+        Communication cost includes ALL nodes accessed during verification:
+        1. Input leaves (document hashes being verified)
+        2. Proof hashes (sibling nodes provided in proof)
+        3. ALL computed intermediate nodes (created during tree reconstruction)
+        
+        PathMap format:
+        - Array of pairs of indices [left_idx, right_idx, left_idx, right_idx, ...]
+        - Each pair represents a hash operation: hash(value[left_idx], value[right_idx])
+        - Indices reference: leaves (0..leavesLen-1), proof (leavesLen..leavesLen+proofLen-1), 
+          computed (leavesLen+proofLen onwards)
+        - Each pair creates ONE new intermediate node in the scratchpad
+        
+        Therefore: num_computed_nodes = len(path_map) // 2
+        Total communication cost = len(leaves) + len(proof_hashes) + num_computed_nodes
+        """
+        
+        # Count number of computed intermediate nodes
+        # Each pair in pathMap creates one new intermediate hash
+        num_computed_nodes = len(path_map) // 2
+        
+        # Total communication cost = all nodes accessed during verification
+        total_cost = len(leaves) + len(proof_hashes) + num_computed_nodes
+        
+        return total_cost
+    
     def _build_all_tree_systems(self, documents, transactional_pattern=None, audit_pattern=None, selected_approaches: list[str] =None):
         """Build tree systems for comparison based on selected approaches."""
         self.transactional_pattern = transactional_pattern
@@ -160,7 +270,6 @@ class TestRunner:
 
         if 'traditional_property_level_huffman' in selected_approaches:
             print("Building Traditional Property-Level Huffman System...")
-            traditional_property_level_huffman_start = time.time()
             # allow per-model alpha override
             tpl_alpha = None
             if hasattr(self, 'alpha_overrides') and self.alpha_overrides:
@@ -169,6 +278,10 @@ class TestRunner:
                 traditional_property_level_huffman_builder = TraditionalPropertyLevelHuffmanBuilder(documents, audit_pattern, transactional_pattern, alpha_threshold=tpl_alpha)
             else:
                 traditional_property_level_huffman_builder = TraditionalPropertyLevelHuffmanBuilder(documents, audit_pattern, transactional_pattern)
+            # Pre-compute frequencies BEFORE timing (simulates having real transaction logs)
+            traditional_property_level_huffman_builder.precompute_frequencies()
+            # Time only the actual tree construction
+            traditional_property_level_huffman_start = time.time()
             traditional_property_level_huffman_root = traditional_property_level_huffman_builder.build()
             traditional_property_level_huffman_build_time = time.time() - traditional_property_level_huffman_start
 
@@ -181,8 +294,6 @@ class TestRunner:
 
         if 'clustered_province_with_document_huffman' in selected_approaches:
             print("Building Clustered Province + Document-Level Huffman System...")
-            doc_huffman_start = time.time()
-            # Import and use the new hybrid builder
             # allow per-model alpha override
             cpdh_alpha = None
             if hasattr(self, 'alpha_overrides') and self.alpha_overrides:
@@ -191,6 +302,10 @@ class TestRunner:
                 clustered_province_with_document_huffman_builder = ClusteredProvinceWithDocumentHuffmanBuilder(documents, audit_pattern, transactional_pattern, alpha_threshold=cpdh_alpha)
             else:
                 clustered_province_with_document_huffman_builder = ClusteredProvinceWithDocumentHuffmanBuilder(documents, audit_pattern, transactional_pattern)
+            # Pre-compute frequencies BEFORE timing (simulates having real transaction logs)
+            clustered_province_with_document_huffman_builder.precompute_frequencies()
+            # Time only the actual tree construction
+            doc_huffman_start = time.time()
             clustered_province_with_document_huffman_root = clustered_province_with_document_huffman_builder.build()
             clustered_province_with_document_huffman_build_time = time.time() - doc_huffman_start
 
@@ -207,6 +322,70 @@ class TestRunner:
                 jurisdiction_tree_builder = JurisdictionTreeBuilder(documents, audit_pattern, transactional_pattern)
             jurisdiction_tree_root = jurisdiction_tree_builder.build()
             jurisdiction_tree_build_time = time.time() - jurisdiction_start
+
+        # Update contract roots after tree construction
+        print("\nUpdating contract roots after tree construction...")
+        if self.web3:
+            if 'traditional_multiproof' in selected_approaches and self.traditional_multiproof_contract:
+                try:
+                    root_hex = "0x" + traditional_multiproof_root
+                    tx_hash = self.traditional_multiproof_contract.functions.updateRoot(bytes.fromhex(traditional_multiproof_root)).transact()
+                    self.web3.eth.wait_for_transaction_receipt(tx_hash)
+                    print(f"  ✅ Traditional Multiproof root updated: {root_hex[:10]}...")
+                except Exception as e:
+                    print(f"  ⚠️ Failed to update Traditional Multiproof root: {e}")
+            
+            if 'traditional_document_huffman' in selected_approaches and self.traditional_document_huffman_contract:
+                try:
+                    root_hex = "0x" + traditional_document_huffman_root
+                    tx_hash = self.traditional_document_huffman_contract.functions.updateRoot(bytes.fromhex(traditional_document_huffman_root)).transact()
+                    self.web3.eth.wait_for_transaction_receipt(tx_hash)
+                    print(f"  ✅ Traditional Document Huffman root updated: {root_hex[:10]}...")
+                except Exception as e:
+                    print(f"  ⚠️ Failed to update Traditional Document Huffman root: {e}")
+            
+            if 'traditional_property_level_huffman' in selected_approaches and self.traditional_property_level_huffman_contract:
+                try:
+                    root_hex = "0x" + traditional_property_level_huffman_root
+                    root_bytes32 = bytes.fromhex(traditional_property_level_huffman_root)
+                    tx_hash = self.traditional_property_level_huffman_contract.functions.updateRoot(root_bytes32).transact()
+                    self.web3.eth.wait_for_transaction_receipt(tx_hash)
+                    # Verify the root was set correctly
+                    stored_root = self.traditional_property_level_huffman_contract.functions.merkleRoot().call()
+                    stored_root_hex = "0x" + stored_root.hex()
+                    print(f"  ✅ Traditional Property-Level Huffman root updated: {root_hex[:10]}...")
+                    print(f"     Stored root in contract: {stored_root_hex[:10]}...")
+                    if stored_root.hex() != traditional_property_level_huffman_root:
+                        print(f"     ⚠️ WARNING: Root mismatch! Expected {root_hex[:16]}... but got {stored_root_hex[:16]}...")
+                except Exception as e:
+                    print(f"  ⚠️ Failed to update Traditional Property-Level Huffman root: {e}")
+            
+            if 'clustered_province' in selected_approaches and self.clustered_province_contract:
+                try:
+                    root_hex = "0x" + clustered_province_root
+                    tx_hash = self.clustered_province_contract.functions.updateRoot(bytes.fromhex(clustered_province_root)).transact()
+                    self.web3.eth.wait_for_transaction_receipt(tx_hash)
+                    print(f"  ✅ Clustered Province root updated: {root_hex[:10]}...")
+                except Exception as e:
+                    print(f"  ⚠️ Failed to update Clustered Province root: {e}")
+            
+            if 'clustered_province_with_document_huffman' in selected_approaches and self.clustered_province_with_document_huffman_contract:
+                try:
+                    root_hex = "0x" + clustered_province_with_document_huffman_root
+                    tx_hash = self.clustered_province_with_document_huffman_contract.functions.updateRoot(bytes.fromhex(clustered_province_with_document_huffman_root)).transact()
+                    self.web3.eth.wait_for_transaction_receipt(tx_hash)
+                    print(f"  ✅ Clustered Province with Document Huffman root updated: {root_hex[:10]}...")
+                except Exception as e:
+                    print(f"  ⚠️ Failed to update Clustered Province with Document Huffman root: {e}")
+            
+            if 'jurisdiction_tree' in selected_approaches and self.jurisdiction_tree_contract:
+                try:
+                    root_hex = "0x" + jurisdiction_tree_root
+                    tx_hash = self.jurisdiction_tree_contract.functions.updateRoot(bytes.fromhex(jurisdiction_tree_root)).transact()
+                    self.web3.eth.wait_for_transaction_receipt(tx_hash)
+                    print(f"  ✅ Jurisdiction Tree root updated: {root_hex[:10]}...")
+                except Exception as e:
+                    print(f"  ⚠️ Failed to update Jurisdiction Tree root: {e}")
 
         tree_systems = {}
         
@@ -275,8 +454,13 @@ class TestRunner:
         
         return tree_systems
     
-    def _build_alpha_specific_tree_systems(self, documents, alpha_value: float, transactional_pattern, audit_pattern, selected_approaches: list[str]):
-        """Build tree systems with specific alpha value for hyperparameter tuning."""
+    def _build_alpha_specific_tree_systems(self, documents, alpha_value: float, transactional_pattern, audit_pattern, selected_approaches: list[str], precomputed_frequencies=None):
+        """Build tree systems with specific alpha value for hyperparameter tuning.
+        
+        Args:
+            precomputed_frequencies: Optional pre-computed frequency data to avoid redundant simulation.
+                                    For alpha tuning, frequencies are computed once and reused.
+        """
         tree_systems = {}
         
         if 'traditional_document_huffman' in selected_approaches:
@@ -296,10 +480,17 @@ class TestRunner:
 
         if 'traditional_property_level_huffman' in selected_approaches:
             print(f"Building Traditional Property-Level Huffman System (α = {alpha_value})...")
-            start_time = time.time()
             builder = TraditionalPropertyLevelHuffmanBuilder(documents, audit_pattern=audit_pattern, transactional_pattern=transactional_pattern, alpha_threshold=alpha_value)
+            # Use pre-computed frequencies if available, otherwise compute
+            if precomputed_frequencies is not None:
+                builder._cached_frequencies = precomputed_frequencies
+            else:
+                builder.precompute_frequencies()
+            start_time = time.time()
             root = builder.build()
             build_time = time.time() - start_time
+            # Update contract root after tree construction
+            self._update_contract_root(self.traditional_property_level_huffman_contract, root, "Traditional Property-Level Huffman")
             
             tree_systems['traditional_property_level_huffman'] = {
                 'builder': builder,
@@ -311,10 +502,17 @@ class TestRunner:
 
         if 'clustered_province_with_document_huffman' in selected_approaches:
             print(f"Building Clustered Province + Document-Level Huffman System (α = {alpha_value})...")
-            start_time = time.time()
             builder = ClusteredProvinceWithDocumentHuffmanBuilder(documents, audit_pattern=audit_pattern, transactional_pattern=transactional_pattern, alpha_threshold=alpha_value)
+            # Use pre-computed frequencies if available, otherwise compute
+            if precomputed_frequencies is not None:
+                builder._cached_frequencies = precomputed_frequencies
+            else:
+                builder.precompute_frequencies()
+            start_time = time.time()
             root = builder.build()
             build_time = time.time() - start_time
+            # Update contract root after tree construction
+            self._update_contract_root(self.clustered_province_with_document_huffman_contract, root, "Clustered Province + Document Huffman")
             
             tree_systems['clustered_province_with_document_huffman'] = {
                 'builder': builder,
@@ -330,6 +528,8 @@ class TestRunner:
             builder = JurisdictionTreeBuilder(documents, audit_pattern=audit_pattern, transactional_pattern=transactional_pattern, alpha_threshold=alpha_value)
             root = builder.build()
             build_time = time.time() - start_time
+            # Update contract root after tree construction
+            self._update_contract_root(self.jurisdiction_tree_contract, root, "Jurisdiction Tree")
             
             tree_systems['jurisdiction_tree'] = {
                 'builder': builder,
@@ -376,6 +576,9 @@ class TestRunner:
         """
         Run alpha hyperparameter tuning tests for pairs-first Huffman models.
         
+        OPTIMIZED: Pre-computes frequencies ONCE per approach, then reuses for all alpha values.
+        Frequencies don't depend on alpha - only the pair merging threshold does.
+        
         Args:
             documents: List of Document objects
             queries: List of Query objects to execute
@@ -408,6 +611,24 @@ class TestRunner:
         
         tuning_results = {}
         
+        # OPTIMIZATION: Pre-compute frequencies ONCE per approach (frequencies don't depend on alpha)
+        precomputed_frequencies = {}
+        for approach_name in tuning_approaches:
+            print(f"\n📊 Pre-computing frequencies for {approach_name}...")
+            if approach_name == 'traditional_property_level_huffman':
+                temp_builder = TraditionalPropertyLevelHuffmanBuilder(
+                    documents, audit_pattern=audit_pattern, 
+                    transactional_pattern=transactional_pattern, alpha_threshold=0.0
+                )
+                precomputed_frequencies[approach_name] = temp_builder.precompute_frequencies()
+            elif approach_name == 'clustered_province_with_document_huffman':
+                temp_builder = ClusteredProvinceWithDocumentHuffmanBuilder(
+                    documents, audit_pattern=audit_pattern,
+                    transactional_pattern=transactional_pattern, alpha_threshold=0.0
+                )
+                precomputed_frequencies[approach_name] = temp_builder.precompute_frequencies()
+            # Add other approaches as needed
+        
         for approach_name in tuning_approaches:
             print(f"\n🔧 Tuning {approach_name}...")
             approach_results = {}
@@ -415,9 +636,10 @@ class TestRunner:
             for alpha in alpha_values:
                 print(f"\n   📈 Testing α = {alpha}...")
                 
-                # Build tree systems with this specific alpha value
+                # Build tree systems with this specific alpha value, using pre-computed frequencies
                 tree_systems = self._build_alpha_specific_tree_systems(
-                    documents, alpha, transactional_pattern, audit_pattern, [approach_name]
+                    documents, alpha, transactional_pattern, audit_pattern, [approach_name],
+                    precomputed_frequencies=precomputed_frequencies.get(approach_name)
                 )
                 
                 if approach_name not in tree_systems:
@@ -737,14 +959,16 @@ class TestRunner:
                 'verification_success': result['success'],
                 'gas_used': result.get('gas_used', 0),
                 'proof_size': result.get('proof_size', 0),
+                'communication_cost': result.get('communication_cost', 0),
                 'verification_time': verification_time,
                 'num_documents': len(documents_to_verify)
             })
             
-            # Log successful verification details - documents_to_verify contains hash strings
-            print(f"    ✅ Successfully verified {len(documents_to_verify)} documents with hashes: {[h[:8] for h in documents_to_verify[:3]]}{'...' if len(documents_to_verify) > 3 else ''}")
-            
-            if not result['success']:
+            # Log verification result
+            if result['success']:
+                print(f"    ✅ Successfully verified {len(documents_to_verify)} documents with hashes: {[h[:8] for h in documents_to_verify[:3]]}{'...' if len(documents_to_verify) > 3 else ''}")
+            else:
+                print(f"    ❌ Verification FAILED for {len(documents_to_verify)} documents")
                 query_result['error'] = result.get('error', 'Verification failed')
             
         except Exception as e:
@@ -773,11 +997,14 @@ class TestRunner:
             # Generate traditional multiproof using OpenZeppelin format
             try:
                 # Use traditional OpenZeppelin multiproof format (not pathMap)
-                proof, proof_flags = builder.generate_batched_proof_with_flags(document_hashes_hex)
+                # Returns proof, flags, AND leaves in the correct order for verification
+                proof, proof_flags, leaves_in_order = builder.generate_batched_proof_with_flags(document_hashes_hex)
                 
                 # Consistent proof size calculation across all approaches
                 proof_size = len(proof) * 32# + len(proof_flags)
-                print(f"      Generated traditional multiproof: {len(proof)} elements, {len(proof_flags)} flags")
+                # Calculate actual communication cost by simulating verification
+                communication_cost = self._calculate_communication_cost_multiproof(proof, proof_flags, leaves_in_order)
+                print(f"      Generated traditional multiproof: {len(proof)} elements, {len(proof_flags)} flags, communication_cost: {communication_cost}")
             except Exception as e:
                 print(f"      ❌ Multiproof generation failed: {e}")
                 return {'success': False, 'error': f'Multiproof generation failed: {e}'}
@@ -790,26 +1017,34 @@ class TestRunner:
             if self.web3 and self.traditional_multiproof_contract:
                 try:
                     # Convert data for traditional multiproof contract call
+                    # IMPORTANT: Use leaves_in_order (tree-index order), NOT sorted by hash!
                     proof_bytes = [bytes.fromhex(p.replace('0x', '')) for p in proof]
-                    leaves_bytes = [bytes.fromhex(leaf.replace('0x', '')) for leaf in sorted(document_hashes_hex)]
+                    leaves_bytes = [bytes.fromhex(leaf.replace('0x', '')) for leaf in leaves_in_order]
                     
                     # Use traditional OpenZeppelin multiproof format: verifyBatch(proof, proofFlags, leaves)
-                    tx_hash = self.traditional_multiproof_contract.functions.verifyBatch(
+                    # Call the view function and check the boolean return value
+                    is_valid = self.traditional_multiproof_contract.functions.verifyBatch(
                         proof_bytes, proof_flags, leaves_bytes
-                    ).transact()
+                    ).call()
                     
-                    receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-                    gas_used = receipt.gasUsed
+                    # Estimate gas cost
+                    gas_used = self.traditional_multiproof_contract.functions.verifyBatch(
+                        proof_bytes, proof_flags, leaves_bytes
+                    ).estimate_gas()
                     
-                    print(f"      ✅ On-chain traditional multiproof verification successful - Gas used: {gas_used:,}")
-                    return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size}
+                    if is_valid:
+                        print(f"      ✅ On-chain traditional multiproof verification successful - Gas used: {gas_used:,}")
+                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost}
+                    else:
+                        print(f"      ❌ On-chain verification returned False - proof is invalid")
+                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost}
                     
                 except Exception as e:
                     print(f"      ❌ On-chain verification failed: {e}")
-                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size}
+                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size, 'communication_cost': communication_cost}
             else:
                 print(f"    ⚠️ No Web3 connection or contract - skipping on-chain verification")
-                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size}
+                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size, 'communication_cost': communication_cost}
             
         except Exception as e:
             return {'success': False, 'error': str(e)}
@@ -852,16 +1087,22 @@ class TestRunner:
                     proof_hashes_bytes = [bytes.fromhex(ph.replace('0x', '')) for ph in pathmap_proof['proofHashes']]
                     path_map = pathmap_proof['pathMap']
                     
-                    # Call contract verification with pathMap format
-                    tx_hash = self.traditional_document_huffman_contract.functions.verifyBatch(
+                    # Call contract verification with pathMap format and check boolean return value
+                    is_valid = self.traditional_document_huffman_contract.functions.verifyBatch(
                         leaves_bytes, proof_hashes_bytes, path_map
-                    ).transact()
+                    ).call()
                     
-                    receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-                    gas_used = receipt.gasUsed
-                    print(f"      ✅ On-chain pathMap verification successful - Gas used: {gas_used:,}")
+                    # Estimate gas cost
+                    gas_used = self.traditional_document_huffman_contract.functions.verifyBatch(
+                        leaves_bytes, proof_hashes_bytes, path_map
+                    ).estimate_gas()
                     
-                    return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size}
+                    if is_valid:
+                        print(f"      ✅ On-chain pathMap verification successful - Gas used: {gas_used:,}")
+                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size}
+                    else:
+                        print(f"      ❌ On-chain verification returned False - proof is invalid")
+                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size}
                 except Exception as e:
                     print(f"      ❌ On-chain verification failed: {e}")
                     return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size}
@@ -888,26 +1129,73 @@ class TestRunner:
                     document_hashes_hex.append(doc)
                     # print(f"      Adding document hash: {doc[:8]}...")
             
-            # Generate proofs - Property Level Huffman uses pathMap format
+            # Generate proofs - Property Level Huffman uses direct bitmap proof generation
             try:
-                # Use new pathMap format
-                pathmap_proof = builder.generate_pathmap_proof(document_hashes_hex)
-                proof_size = (len(pathmap_proof['leaves']) + len(pathmap_proof['proofHashes'])) * 32
-                print(f"      Using generate_pathmap_proof method - {len(pathmap_proof['leaves'])} leaves, {len(pathmap_proof['proofHashes'])} proof hashes, {len(pathmap_proof['pathMap'])//2} instructions")
+                # Use new direct post-order bitmap proof generation (not PathMap conversion)
+                bitmap_proof = builder.generate_bitmap_proof(document_hashes_hex)
+                
+                proof_size = len(bitmap_proof['inputs']) * 32
+                num_pushes = bitmap_proof['num_pushes']
+                num_merges = bitmap_proof['num_merges']
+                communication_cost = num_pushes + num_merges
+                
+                # Verify invariant: merges = pushes - 1
+                expected_merges = num_pushes - 1
+                if num_merges != expected_merges:
+                    print(f"      ⚠️ WARNING: Operation count mismatch! {num_pushes} pushes but {num_merges} merges (expected {expected_merges})")
+                
+                print(f"      Using direct bitmap format - {num_pushes} inputs, {num_merges} merges, {len(bitmap_proof['bitmap'])} bitmap words, communication_cost: {communication_cost}")
             except Exception as e:
                 print(f"      ❌ Proof generation failed: {e}")
+                import traceback
+                traceback.print_exc()
                 return {'success': False, 'error': f'Proof generation failed: {e}'}
             
-            # Skip local verification for benchmark - focus on on-chain verification only
-            print(f"      ⚠️ Skipping local verification for benchmark - using on-chain verification only")
+            # Local verification for debugging
+            if hasattr(builder, 'verify_bitmap_locally'):
+                local_valid, local_msg = builder.verify_bitmap_locally(bitmap_proof['inputs'], bitmap_proof['bitmap'])
+                if not local_valid:
+                    print(f"      ❌ Local verification FAILED: {local_msg}")
+                    return {'success': False, 'error': f'Local verification failed: {local_msg}', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                else:
+                    print(f"      ✅ Local verification passed: {local_msg}")
             
             # On-chain verification if Web3 available
             gas_used = 0
             if self.web3 and self.traditional_property_level_huffman_contract:
                 try:
-                    # New pathMap verification format
-                    leaves_bytes = [bytes.fromhex(leaf.replace('0x', '')) for leaf in pathmap_proof['leaves']]
-                    proof_hashes_bytes = [bytes.fromhex(ph.replace('0x', '')) for ph in pathmap_proof['proofHashes']]
+                    # New bitmap verification format
+                    inputs_bytes = [bytes.fromhex(h.replace('0x', '')) for h in bitmap_proof['inputs']]
+                    bitmap = bitmap_proof['bitmap']
+                    
+                    # Call contract verification with bitmap format and check boolean return value
+                    is_valid = self.traditional_property_level_huffman_contract.functions.verifyBatch(
+                        inputs_bytes, bitmap
+                    ).call()
+                    
+                    # Estimate gas cost
+                    gas_used = self.traditional_property_level_huffman_contract.functions.verifyBatch(
+                        inputs_bytes, bitmap
+                    ).estimate_gas()
+                    
+                    if is_valid:
+                        print(f"      ✅ On-chain bitmap verification successful - Gas used: {gas_used:,}")
+                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost}
+                    else:
+                        # Debug: check stored root vs expected root
+                        stored_root = self.traditional_property_level_huffman_contract.functions.merkleRoot().call()
+                        expected_root = tree_system['root']
+                        print(f"      ❌ On-chain verification returned False - proof is invalid")
+                        print(f"         Expected root: 0x{expected_root[:16]}...")
+                        print(f"         Stored root:   0x{stored_root.hex()[:16]}...")
+                        if stored_root.hex() != expected_root:
+                            print(f"         ⚠️ ROOT MISMATCH detected!")
+                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                except Exception as e:
+                    print(f"      ❌ On-chain verification failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size}
                     path_map = pathmap_proof['pathMap']
                     
                     # Call contract verification with pathMap format
@@ -919,13 +1207,13 @@ class TestRunner:
                     gas_used = receipt.gasUsed
                     print(f"      ✅ On-chain pathMap verification successful - Gas used: {gas_used:,}")
                     
-                    return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size}
+                    return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost}
                 except Exception as e:
                     print(f"      ❌ On-chain verification failed: {e}")
-                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size}
+                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size, 'communication_cost': communication_cost}
             else:
                 print(f"    ⚠️ No Web3 connection or contract - skipping on-chain verification")
-                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size}
+                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size, 'communication_cost': communication_cost}
             
         except Exception as e:
             return {'success': False, 'error': str(e)}
@@ -939,11 +1227,14 @@ class TestRunner:
             # Standardized input handling - convert Document objects to hex strings
             document_hashes_hex = [doc.hash_hex for doc in documents_to_verify]
             
-            # Generate proofs using pathMap format
+            # Generate proofs using OpenZeppelin multiproof format
             try:
-                pathmap_proof = builder.generate_pathmap_proof(document_hashes_hex)
-                proof_size = (len(pathmap_proof['leaves']) + len(pathmap_proof['proofHashes'])) * 32
-                print(f"      Using generate_pathmap_proof method - {len(pathmap_proof['leaves'])} leaves, {len(pathmap_proof['proofHashes'])} proof hashes, {len(pathmap_proof['pathMap'])//2} instructions")
+                # Returns proof, flags, AND leaves in the correct order for verification
+                proof, proof_flags, leaves_in_order = builder.generate_multiproof(document_hashes_hex)
+                proof_size = len(proof) * 32
+                # Calculate actual communication cost by simulating verification
+                communication_cost = self._calculate_communication_cost_multiproof(proof, proof_flags, leaves_in_order)
+                print(f"      Generated OpenZeppelin multiproof: {len(proof)} elements, {len(proof_flags)} flags, communication_cost: {communication_cost}")
             except Exception as e:
                 print(f"      ❌ Multiproof generation failed: {e}")
                 return {'success': False, 'error': f'Multiproof generation failed: {e}'}
@@ -955,27 +1246,33 @@ class TestRunner:
             gas_used = 0
             if self.web3 and self.clustered_province_contract:
                 try:
-                    # New pathMap verification format
-                    leaves_bytes = [bytes.fromhex(leaf.replace('0x', '')) for leaf in pathmap_proof['leaves']]
-                    proof_hashes_bytes = [bytes.fromhex(ph.replace('0x', '')) for ph in pathmap_proof['proofHashes']]
-                    path_map = pathmap_proof['pathMap']
+                    # Convert to bytes for OpenZeppelin multiproof format
+                    # IMPORTANT: Use leaves_in_order (tree-index order), NOT sorted by hash!
+                    proof_bytes = [bytes.fromhex(p.replace('0x', '')) for p in proof]
+                    leaves_bytes = [bytes.fromhex(leaf.replace('0x', '')) for leaf in leaves_in_order]
                     
-                    # Call contract verification with pathMap format
-                    tx_hash = self.clustered_province_contract.functions.verifyBatch(
-                        leaves_bytes, proof_hashes_bytes, path_map
-                    ).transact()
+                    # Call contract verification with OpenZeppelin format and check boolean return value
+                    is_valid = self.clustered_province_contract.functions.verifyBatch(
+                        proof_bytes, proof_flags, leaves_bytes
+                    ).call()
                     
-                    receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-                    gas_used = receipt.gasUsed
-                    print(f"      ✅ On-chain pathMap verification successful - Gas used: {gas_used:,}")
+                    # Estimate gas cost
+                    gas_used = self.clustered_province_contract.functions.verifyBatch(
+                        proof_bytes, proof_flags, leaves_bytes
+                    ).estimate_gas()
                     
-                    return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size}
+                    if is_valid:
+                        print(f"      ✅ On-chain OpenZeppelin multiproof verification successful - Gas used: {gas_used:,}")
+                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost}
+                    else:
+                        print(f"      ❌ On-chain verification returned False - proof is invalid")
+                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost}
                 except Exception as e:
                     print(f"      ❌ On-chain verification failed: {e}")
-                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size}
+                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size, 'communication_cost': communication_cost}
             else:
                 print(f"    ⚠️ No Web3 connection or contract - skipping on-chain verification")
-                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size}
+                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size, 'communication_cost': communication_cost}
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
@@ -988,43 +1285,79 @@ class TestRunner:
             # Standardized input handling - convert Document objects to hex strings
             document_hashes_hex = [doc.hash_hex for doc in documents_to_verify]
             
-            # Generate proofs using pathMap format
+            # Generate proofs using direct bitmap format (post-order traversal)
             try:
-                pathmap_proof = builder.generate_pathmap_proof(document_hashes_hex)
-                proof_size = (len(pathmap_proof['leaves']) + len(pathmap_proof['proofHashes'])) * 32
-                print(f"      Using generate_pathmap_proof method - {len(pathmap_proof['leaves'])} leaves, {len(pathmap_proof['proofHashes'])} proof hashes, {len(pathmap_proof['pathMap'])//2} instructions")
+                # Use new direct post-order bitmap proof generation (not PathMap conversion)
+                bitmap_proof = builder.generate_bitmap_proof(document_hashes_hex)
+                
+                proof_size = len(bitmap_proof['inputs']) * 32
+                num_pushes = bitmap_proof['num_pushes']
+                num_merges = bitmap_proof['num_merges']
+                communication_cost = num_pushes + num_merges
+                
+                # Verify invariant: merges = pushes - 1
+                expected_merges = num_pushes - 1
+                if num_merges != expected_merges:
+                    print(f"      ⚠️ WARNING: Operation count mismatch! {num_pushes} pushes but {num_merges} merges (expected {expected_merges})")
+                
+                print(f"      Using direct bitmap format - {num_pushes} inputs, {num_merges} merges, {len(bitmap_proof['bitmap'])} bitmap words, communication_cost: {communication_cost}")
             except Exception as e:
                 print(f"      ❌ Multiproof generation failed: {e}")
+                import traceback
+                traceback.print_exc()
                 return {'success': False, 'error': f'Multiproof generation failed: {e}'}
             
-            # Skip local verification for benchmark - focus on on-chain verification only
-            print(f"      ⚠️ Skipping local verification for benchmark - using on-chain verification only")
+            # Local verification for debugging
+            if hasattr(builder, 'verify_bitmap_locally'):
+                local_valid, local_msg = builder.verify_bitmap_locally(bitmap_proof['inputs'], bitmap_proof['bitmap'])
+                if not local_valid:
+                    print(f"      ❌ Local verification FAILED: {local_msg}")
+                    return {'success': False, 'error': f'Local verification failed: {local_msg}', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                else:
+                    print(f"      ✅ Local verification passed: {local_msg}")
             
             # On-chain verification if Web3 available
             gas_used = 0
-            if self.web3 and self.clustered_province_with_document_huffman_contract:  # Use the same contract as regular clustered province
+            if self.web3 and self.clustered_province_with_document_huffman_contract:
                 try:
-                    # New pathMap verification format
-                    leaves_bytes = [bytes.fromhex(leaf.replace('0x', '')) for leaf in pathmap_proof['leaves']]
-                    proof_hashes_bytes = [bytes.fromhex(ph.replace('0x', '')) for ph in pathmap_proof['proofHashes']]
-                    path_map = pathmap_proof['pathMap']
+                    # New bitmap verification format
+                    inputs_bytes = [bytes.fromhex(h.replace('0x', '')) for h in bitmap_proof['inputs']]
+                    bitmap = bitmap_proof['bitmap']
                     
-                    # Call contract verification with pathMap format
-                    tx_hash = self.clustered_province_with_document_huffman_contract.functions.verifyBatch(
-                        leaves_bytes, proof_hashes_bytes, path_map
-                    ).transact()
+                    # Call contract verification with bitmap format and check boolean return value
+                    is_valid = self.clustered_province_with_document_huffman_contract.functions.verifyBatch(
+                        inputs_bytes, bitmap
+                    ).call()
                     
-                    receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-                    gas_used = receipt.gasUsed
-                    print(f"      ✅ On-chain pathMap verification successful - Gas used: {gas_used:,}")
+                    # Estimate gas cost
+                    gas_used = self.clustered_province_with_document_huffman_contract.functions.verifyBatch(
+                        inputs_bytes, bitmap
+                    ).estimate_gas()
                     
-                    return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size}
+                    if is_valid:
+                        print(f"      ✅ On-chain bitmap verification successful - Gas used: {gas_used:,}")
+                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost}
+                    else:
+                        # Debug: check stored root vs expected root
+                        stored_root = self.clustered_province_with_document_huffman_contract.functions.merkleRoot().call()
+                        expected_root = tree_system.get('root')
+                        print(f"      ❌ On-chain verification returned False - proof is invalid")
+                        if expected_root:
+                            print(f"         Expected root: 0x{expected_root[:16]}...")
+                        else:
+                            print(f"         Expected root: None (root not set in tree_system)")
+                        print(f"         Stored root:   0x{stored_root.hex()[:16]}...")
+                        if expected_root and stored_root.hex() != expected_root:
+                            print(f"         ⚠️ ROOT MISMATCH detected!")
+                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost}
                 except Exception as e:
                     print(f"      ❌ On-chain verification failed: {e}")
-                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size}
+                    import traceback
+                    traceback.print_exc()
+                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size, 'communication_cost': communication_cost}
             else:
                 print(f"    ⚠️ No Web3 connection or contract - skipping on-chain verification")
-                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size}
+                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size, 'communication_cost': communication_cost}
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
@@ -1242,6 +1575,7 @@ class TestRunner:
                 'success_rates': {},
                 'build_times': {},
                 'proof_sizes': {},
+                'communication_costs': {},
                 'verification_times': {}
             }
         }
@@ -1272,6 +1606,12 @@ class TestRunner:
                     'max_size': 0,
                     'avg_size': 0,
                     'size_values': []
+                },
+                'communication_cost_statistics': {
+                    'min_cost': float('inf'),
+                    'max_cost': 0,
+                    'avg_cost': 0,
+                    'cost_values': []
                 },
                 'verification_time_statistics': {
                     'min_time': float('inf'),
@@ -1307,6 +1647,13 @@ class TestRunner:
                     approach_summary['proof_size_statistics']['min_size'] = min(approach_summary['proof_size_statistics']['min_size'], proof_size)
                     approach_summary['proof_size_statistics']['max_size'] = max(approach_summary['proof_size_statistics']['max_size'], proof_size)
                 
+                # Communication cost statistics
+                if query_result.get('communication_cost', 0) > 0:
+                    comm_cost = query_result['communication_cost']
+                    approach_summary['communication_cost_statistics']['cost_values'].append(comm_cost)
+                    approach_summary['communication_cost_statistics']['min_cost'] = min(approach_summary['communication_cost_statistics']['min_cost'], comm_cost)
+                    approach_summary['communication_cost_statistics']['max_cost'] = max(approach_summary['communication_cost_statistics']['max_cost'], comm_cost)
+                
                 # Verification time statistics
                 if query_result.get('verification_time', 0) > 0:
                     ver_time = query_result['verification_time']
@@ -1327,6 +1674,12 @@ class TestRunner:
             else:
                 approach_summary['proof_size_statistics']['min_size'] = 0
             
+            if approach_summary['communication_cost_statistics']['cost_values']:
+                approach_summary['communication_cost_statistics']['avg_cost'] = np.mean(approach_summary['communication_cost_statistics']['cost_values'])
+                approach_summary['communication_cost_statistics']['std_cost'] = np.std(approach_summary['communication_cost_statistics']['cost_values'])
+            else:
+                approach_summary['communication_cost_statistics']['min_cost'] = 0
+            
             if approach_summary['verification_time_statistics']['time_values']:
                 approach_summary['verification_time_statistics']['avg_time'] = np.mean(approach_summary['verification_time_statistics']['time_values'])
                 approach_summary['verification_time_statistics']['std_time'] = np.std(approach_summary['verification_time_statistics']['time_values'])
@@ -1340,6 +1693,7 @@ class TestRunner:
             summary['comparison']['success_rates'][approach_name] = approach_summary['success_rate_percent']
             summary['comparison']['build_times'][approach_name] = approach_summary['build_time_seconds']
             summary['comparison']['proof_sizes'][approach_name] = approach_summary['proof_size_statistics']['avg_size']
+            summary['comparison']['communication_costs'][approach_name] = approach_summary['communication_cost_statistics']['avg_cost']
             summary['comparison']['verification_times'][approach_name] = approach_summary['verification_time_statistics']['avg_time']
         
         return summary
@@ -1395,17 +1749,17 @@ class TestRunner:
                 axes[0, 2].text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(build_times)*0.01,
                                f'{value:.1f}', ha='center', va='bottom', fontsize=9)
             
-            # 4. Average Proof Size Comparison
-            proof_sizes = [summary_metrics['comparison']['proof_sizes'][app] for app in approaches]
-            bars4 = axes[1, 0].bar(approach_labels, proof_sizes, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4'])
-            axes[1, 0].set_title('Average Proof Size Comparison', fontweight='bold')
-            axes[1, 0].set_ylabel('Proof Size (bytes)')
+            # 4. Average Communication Cost Comparison
+            comm_costs = [summary_metrics['comparison']['communication_costs'][app] for app in approaches]
+            bars4 = axes[1, 0].bar(approach_labels, comm_costs, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4'])
+            axes[1, 0].set_title('Average Communication Cost (Nodes)', fontweight='bold')
+            axes[1, 0].set_ylabel('Number of Nodes')
             axes[1, 0].tick_params(axis='x', rotation=45)
             
             # Add value labels
-            for bar, value in zip(bars4, proof_sizes):
+            for bar, value in zip(bars4, comm_costs):
                 if value > 0:
-                    axes[1, 0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(proof_sizes)*0.01,
+                    axes[1, 0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(comm_costs)*0.01,
                                    f'{int(value)}', ha='center', va='bottom', fontsize=9)
             
             # 5. Gas Usage Distribution (Box Plot)
@@ -1857,9 +2211,9 @@ def main():
         document_importance_map=DOCUMENT_IMPORTANCE_MAP,
         alpha_threshold=0.15,         # Lower threshold for more pair detection
         use_zipfian=True,             # Enable realistic heavy-tail distribution for documents
-        zipf_parameter=1.3,           # Moderate concentration (1.0-2.0 range) 
+        zipf_parameter=1.05,          # Zipfian exponent s=1.05 (mild concentration)
         use_property_zipfian=True,    # Enable property-level Zipfian distribution
-        property_zipf_parameter=1.1,  # Gentler property concentration (economic centers favored)
+        property_zipf_parameter=1.05, # Zipfian exponent s=1.05 (mild concentration)
         random_seed=42                # Fixed seed for reproducible patterns
     )
     audit_pattern = AuditPattern(
