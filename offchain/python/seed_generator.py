@@ -122,28 +122,74 @@ class SeedGenerator:
     def generate_dataset(self) -> list[Property]:
         """
         Generates the full dataset of properties based on provincial distribution.
+        Uses fixed ratio split for deterministic, reproducible results.
+        
+        Minimum requirement: 500 properties to ensure all provinces get representation.
+        Recommended scale: 100,000+ properties for production benchmarks.
         """
+        # Validate minimum property count
+        MIN_PROPERTIES = 500
+        if self.total_properties < MIN_PROPERTIES:
+            raise ValueError(
+                f"Property count must be at least {MIN_PROPERTIES} to ensure all 38 provinces "
+                f"get adequate representation. You requested {self.total_properties}.\n"
+                f"Recommended scales:\n"
+                f"  - Small test: 1,000 properties\n"
+                f"  - Medium benchmark: 10,000 properties\n"
+                f"  - Large benchmark: 100,000 properties\n"
+                f"  - Production scale: 1,000,000+ properties"
+            )
+        
         # Set fixed seed for reproducible results
         random.seed(self.random_seed)
         print(f"Generating a dataset of {self.total_properties} properties (seed={self.random_seed})...")
+        print("Using FIXED RATIO SPLIT for deterministic distribution...")
         dataset = []
         
         provinces = list(self.province_weights.keys())
         weights = list(self.province_weights.values())
         
-        generated_provinces = random.choices(provinces, weights=weights, k=self.total_properties)
+        # Calculate exact property counts per province using fixed ratios
+        property_counts = {}
+        allocated_total = 0
         
-        property_counts = {p: 0 for p in provinces}
-        for province_name in generated_provinces:
-            dataset.append(self._create_random_property(province=province_name))
-            property_counts[province_name] += 1
+        # First pass: allocate floor values
+        for province, weight in zip(provinces, weights):
+            exact_count = weight * self.total_properties
+            floor_count = int(exact_count)
+            property_counts[province] = {
+                'count': floor_count,
+                'remainder': exact_count - floor_count
+            }
+            allocated_total += floor_count
+        
+        # Second pass: distribute remaining properties to provinces with largest remainders
+        remaining = self.total_properties - allocated_total
+        if remaining > 0:
+            # Sort by remainder (descending) and allocate one extra property each
+            sorted_by_remainder = sorted(
+                property_counts.items(), 
+                key=lambda x: x[1]['remainder'], 
+                reverse=True
+            )
+            for i in range(remaining):
+                province_name = sorted_by_remainder[i][0]
+                property_counts[province_name]['count'] += 1
+        
+        # Generate properties for each province
+        for province_name in provinces:
+            count = property_counts[province_name]['count']
+            for _ in range(count):
+                dataset.append(self._create_random_property(province=province_name))
         
         print("Dataset generation complete.")
         print("\n--- Top 5 Provinces in Generated Dataset ---")
-        sorted_counts = sorted(property_counts.items(), key=lambda item: item[1], reverse=True)
+        final_counts = {p: property_counts[p]['count'] for p in provinces}
+        sorted_counts = sorted(final_counts.items(), key=lambda item: item[1], reverse=True)
         for province, count in sorted_counts[:5]:
             percentage = (count / self.total_properties) * 100
-            print(f"  - {province:<20}: {count:>5} properties ({percentage:.2f}%)")
+            expected_percentage = self.province_weights[province] * 100
+            print(f"  - {province:<20}: {count:>5} properties ({percentage:.2f}% - expected {expected_percentage:.2f}%)")
             
         return dataset
 

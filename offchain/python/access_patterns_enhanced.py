@@ -17,7 +17,7 @@ class TransactionalPattern:
     def __init__(self, document_importance_map: dict[str, int], alpha_threshold: float = 0.3, 
                  use_zipfian: bool = True, zipf_parameter: float = 1.05,
                  use_property_zipfian: bool = True, property_zipf_parameter: float = 1.05,
-                 multi_property_ratio: float = 0.25,  # 25% of transactions involve multiple properties
+                 multi_property_ratio: float = 0.30,  # 30% of transactions involve multiple properties
                  random_seed: int = PATTERN_SEED):
         """
         Args:
@@ -443,8 +443,10 @@ class TransactionalPattern:
             province = random.choice(valid_provinces)
             property_ids, normalized_weights = province_weights_cache[province]
             
-            # Select 2-3 properties for multi-property transaction
-            num_props = random.choice([2, 2, 2, 3])  # 75% two properties, 25% three
+            # Select 2-6 properties using Poisson distribution with mean=4
+            # This models realistic transaction patterns: most are 3-5 properties, rare bulk deals up to 6+
+            num_props = np.random.poisson(lam=4)
+            num_props = max(2, min(num_props, 6))  # Clamp to [2, 6] range
             num_props = min(num_props, len(property_ids))
             
             # Weighted selection (popular properties more likely in bundle deals)
