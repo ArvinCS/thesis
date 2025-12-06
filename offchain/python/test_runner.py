@@ -2218,7 +2218,7 @@ def main():
     )
     audit_pattern = AuditPattern(
         province_weights=seed_gen.province_weights,
-        avg_sample_size=50,        # λ for properties per province (realistic average)
+        avg_sample_size=75,        # λ for properties per province (realistic average)
         min_sample_size=10,        # Minimum to ensure meaningful audit samples
         avg_docs_per_property=3,   # λ for documents per property (realistic average)
         min_docs_per_property=1,   # Minimum to ensure at least one document
