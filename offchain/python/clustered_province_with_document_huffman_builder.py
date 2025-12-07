@@ -310,11 +310,18 @@ class ClusteredProvinceWithDocumentHuffmanBuilder:
             
             # Principled sampling formula for research validity:
             # - Ensure minimum 100 multi-property txns per province (×4 since only 25% are multi-property)
-            # - Scale with sqrt(properties) for diminishing returns
-            # - Cap at 50,000 for computational efficiency
+            # - For large datasets (>10k), use linear scaling for better statistical coverage
+            # - No cap for precomputed frequencies (done once during tree construction)
             min_samples_per_province = 400  # 100 multi-property × 4 (25% ratio)
-            sqrt_scaling = int(50 * (num_total_properties ** 0.5))  # ~1,600 for 1k props, ~5,000 for 10k, ~16k for 100k
-            num_simulations = min(50000, max(num_provinces * min_samples_per_province, sqrt_scaling))
+            
+            if num_total_properties <= 10000:
+                # Small datasets: use sqrt scaling (~5,000 for 10k properties)
+                num_simulations = max(num_provinces * min_samples_per_province, int(50 * (num_total_properties ** 0.5)))
+            else:
+                # Large datasets (100k+): use linear scaling for research-grade coverage
+                # 100k properties → 200k simulations (2× coverage)
+                # Ensures rare patterns are captured for accurate frequency distribution
+                num_simulations = max(num_provinces * min_samples_per_province, num_total_properties * 2)
             
             multi_property_pairs = self.transactional_pattern.simulate_multi_property_transactions(
                 self.province_property_groups, 
