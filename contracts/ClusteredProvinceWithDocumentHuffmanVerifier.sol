@@ -94,25 +94,30 @@ contract ClusteredProvinceWithDocumentHuffmanVerifier is Ownable {
                     stackSize--;
                     bytes32 left = stack[stackSize];
                     
-                    // Canonical ordering and hash using assembly for efficiency
+                    // RFC 6962 domain separation with 0x01 prefix for internal nodes
+                    // This prevents second preimage attacks where a 64-byte leaf could
+                    // be interpreted as two concatenated 32-byte hashes
                     bytes32 merged;
                     assembly {
-                        // Allocate memory for hashing (64 bytes)
+                        // Allocate memory for hashing (65 bytes: 1 prefix + 32 + 32)
                         let ptr := mload(0x40)
                         
-                        // Compare and order: smaller hash goes first
+                        // Store 0x01 prefix for internal node (RFC 6962)
+                        mstore8(ptr, 0x01)
+                        
+                        // Compare and order: smaller hash goes first (canonical ordering)
                         switch lt(left, right)
                         case 1 {
-                            mstore(ptr, left)
-                            mstore(add(ptr, 32), right)
+                            mstore(add(ptr, 1), left)
+                            mstore(add(ptr, 33), right)
                         }
                         default {
-                            mstore(ptr, right)
-                            mstore(add(ptr, 32), left)
+                            mstore(add(ptr, 1), right)
+                            mstore(add(ptr, 33), left)
                         }
                         
-                        // Compute keccak256
-                        merged := keccak256(ptr, 64)
+                        // Compute keccak256 over 65 bytes (prefix + left + right)
+                        merged := keccak256(ptr, 65)
                     }
                     
                     stack[stackSize] = merged;

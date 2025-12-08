@@ -201,11 +201,29 @@ class PropertyDocumentGroup:
 
 
 def combine_and_hash(hash1_hex, hash2_hex):
-    """Combine two hashes using keccak256 (OpenZeppelin compatible)."""
+    """
+    Combine two hashes using keccak256 with RFC 6962 domain separation.
+    
+    SECURITY: Uses 0x01 prefix to prevent second preimage attacks.
+    Internal nodes are prefixed with 0x01, making them cryptographically
+    distinct from leaf nodes (which would be prefixed with 0x00 if hashed).
+    This prevents tree splicing attacks where a 64-byte leaf could be
+    interpreted as two concatenated 32-byte hashes.
+    
+    Compatible with OpenZeppelin when both use same domain separation.
+    """
     h1_bytes = bytes.fromhex(hash1_hex)
     h2_bytes = bytes.fromhex(hash2_hex)
-    # Sort hashes to ensure deterministic ordering
-    combined = h1_bytes + h2_bytes if h1_bytes < h2_bytes else h2_bytes + h1_bytes
+    
+    # RFC 6962: 0x01 prefix for internal nodes
+    prefix = b'\x01'
+    
+    # Sort hashes to ensure deterministic ordering (smaller hash first)
+    if h1_bytes < h2_bytes:
+        combined = prefix + h1_bytes + h2_bytes
+    else:
+        combined = prefix + h2_bytes + h1_bytes
+    
     return keccak(combined).hex()
 
 
