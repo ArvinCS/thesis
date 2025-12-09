@@ -12,10 +12,10 @@ import sys
 
 # Approach display names
 APPROACH_NAMES = {
-    'traditional_multiproof': 'Traditional Multiproof',
-    'traditional_property_level_huffman': 'Property-Level Huffman',
-    'clustered_province': 'Clustered Province',
-    'clustered_province_with_document_huffman': 'Hybrid'
+    'traditional_multiproof': 'Standard Balanced Tree',
+    'traditional_property_level_huffman': 'Global Huffman Tree',
+    'clustered_province': 'Clustered Tree',
+    'clustered_province_with_document_huffman': 'Hierarchical Traffic-Aware Tree'
 }
 
 def load_json_data(filepath):
@@ -54,6 +54,17 @@ def extract_proof_sizes(data):
             if q['verification_success']
         ]
         result[approach] = proof_sizes
+    return result
+
+def extract_communication_costs(data):
+    """Extract communication_cost values across all approaches (all query types)."""
+    result = {}
+    for approach, approach_data in data.items():
+        costs = [
+            q['communication_cost'] for q in approach_data['query_results']
+            if q['verification_success'] and 'communication_cost' in q
+        ]
+        result[approach] = costs
     return result
 
 def extract_verification_times(data):
@@ -155,7 +166,7 @@ def create_grouped_bar_chart(data_dict, title, ylabel, filename, output_dir, use
     print(f"✓ Generated: {output_path}")
     plt.close()
 
-def create_build_time_chart(build_times, output_dir):
+def create_build_time_chart(build_times, output_dir, filename='construction_time.png'):
     """Create a simple bar chart for build times."""
     if not build_times:
         print("Warning: No build time data found")
@@ -171,8 +182,8 @@ def create_build_time_chart(build_times, output_dir):
     bars = ax.bar(range(len(approaches)), times, color=colors)
     
     ax.set_xlabel('Approach', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Build Time (seconds)', fontsize=12, fontweight='bold')
-    ax.set_title('Tree Build Time Comparison', fontsize=14, fontweight='bold', pad=20)
+    ax.set_ylabel('Construction Time (seconds)', fontsize=12, fontweight='bold')
+    ax.set_title('Tree Construction Time Comparison', fontsize=14, fontweight='bold', pad=20)
     ax.set_xticks(range(len(approaches)))
     ax.set_xticklabels(display_names, rotation=15, ha='right')
     ax.grid(axis='y', alpha=0.3, linestyle='--')
@@ -186,7 +197,7 @@ def create_build_time_chart(build_times, output_dir):
     
     plt.tight_layout()
     
-    output_path = output_dir / 'build_time_comparison.png'
+    output_path = output_dir / filename
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"✓ Generated: {output_path}")
     plt.close()
@@ -205,78 +216,54 @@ def main():
     print(f"Loading data from: {json_file}")
     data = load_json_data(json_file)
     
-    # Create output directory with the same name as source file
+    # Extract session identifier from filename (e.g., raw_results_20251207_235101.json -> 20251207_235101)
     source_name = json_file.stem  # filename without extension
-    output_dir = json_file.parent / 'charts' / source_name
+    if source_name.startswith('raw_results_'):
+        session_id = source_name.replace('raw_results_', '')
+    else:
+        session_id = source_name
+    
+    # Create session-specific output directory
+    output_dir = json_file.parent / session_id
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}\n")
     
-    print("Generating charts...")
+    print("Generating core benchmark charts...")
     
-    # 1. Gas used for all queries combined
+    # 1. Average Gas Cost
     all_gas = extract_all_gas_usage(data)
     create_grouped_bar_chart(
         all_gas,
-        'Gas Usage - All Query Types',
-        'Gas Used',
-        'gas_all_queries.png',
+        'Average Gas Cost Comparison',
+        'Average Gas Used',
+        'average_gas_cost.png',
         output_dir
     )
     
-    # 2. Gas used for TRANSACTIONAL queries
-    transactional_gas = extract_gas_by_query_type(data, 'TRANSACTIONAL')
+    # 2. Average Communication Cost
+    communication_costs = extract_communication_costs(data)
     create_grouped_bar_chart(
-        transactional_gas,
-        'Gas Usage - Transactional Queries',
-        'Gas Used',
-        'gas_transactional.png',
+        communication_costs,
+        'Average Communication Cost Comparison',
+        'Average Communication Cost (32-byte units)',
+        'average_communication_cost.png',
         output_dir
     )
     
-    # 3. Gas used for REGIONAL_AUDIT queries
-    regional_gas = extract_gas_by_query_type(data, 'REGIONAL_AUDIT')
-    create_grouped_bar_chart(
-        regional_gas,
-        'Gas Usage - Regional Audit Queries',
-        'Gas Used',
-        'gas_regional_audit.png',
-        output_dir
-    )
-    
-    # 4. Gas used for NATIONAL_AUDIT queries
-    national_gas = extract_gas_by_query_type(data, 'NATIONAL_AUDIT')
-    create_grouped_bar_chart(
-        national_gas,
-        'Gas Usage - National Audit Queries',
-        'Gas Used',
-        'gas_national_audit.png',
-        output_dir
-    )
-    
-    # 5. Proof sizes (all query types)
-    proof_sizes = extract_proof_sizes(data)
-    create_grouped_bar_chart(
-        proof_sizes,
-        'Proof Size - All Query Types',
-        'Proof Size (bytes)',
-        'proof_size_all.png',
-        output_dir
-    )
-    
-    # 6. Verification times (all query types)
+    # 3. Average Verification Time
     verification_times = extract_verification_times(data)
     create_grouped_bar_chart(
         verification_times,
-        'Verification Time - All Query Types',
-        'Verification Time (milliseconds)',
-        'verification_time_all.png',
+        'Average Verification Time Comparison',
+        'Average Verification Time (milliseconds)',
+        'average_verification_time.png',
         output_dir,
         use_milliseconds=True
     )
     
-    # 7. Build times
+    # 4. Construction Time
     build_times = extract_build_times(data)
-    create_build_time_chart(build_times, output_dir)
+    create_build_time_chart(build_times, output_dir, filename='construction_time.png')
     
     print(f"\n✓ All charts generated successfully in: {output_dir}")
 
