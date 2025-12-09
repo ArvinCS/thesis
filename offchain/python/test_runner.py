@@ -896,7 +896,6 @@ class TestRunner:
             documents_to_verify = unique_docs
             
             # Execute verification based on approach
-            start_time = time.time()
             
             if approach_name == 'traditional_multiproof':
                 # Traditional methods expect document hashes (strings)
@@ -953,14 +952,15 @@ class TestRunner:
             else:
                 raise ValueError(f"Unsupported approach: {approach_name}")
             
-            verification_time = time.time() - start_time
+            # Use on-chain verification time from result (excludes proof generation and local verification)
+            onchain_verification_time = result.get('onchain_verification_time', 0)
             
             query_result.update({
                 'verification_success': result['success'],
                 'gas_used': result.get('gas_used', 0),
                 'proof_size': result.get('proof_size', 0),
                 'communication_cost': result.get('communication_cost', 0),
-                'verification_time': verification_time,
+                'verification_time': onchain_verification_time,
                 'num_documents': len(documents_to_verify)
             })
             
@@ -1014,12 +1014,16 @@ class TestRunner:
             
             # On-chain verification if Web3 available
             gas_used = 0
+            onchain_verification_time = 0
             if self.web3 and self.traditional_multiproof_contract:
                 try:
                     # Convert data for traditional multiproof contract call
                     # IMPORTANT: Use leaves_in_order (tree-index order), NOT sorted by hash!
                     proof_bytes = [bytes.fromhex(p.replace('0x', '')) for p in proof]
                     leaves_bytes = [bytes.fromhex(leaf.replace('0x', '')) for leaf in leaves_in_order]
+                    
+                    # Time only the on-chain verification calls
+                    onchain_start = time.time()
                     
                     # Use traditional OpenZeppelin multiproof format: verifyBatch(proof, proofFlags, leaves)
                     # Call the view function and check the boolean return value
@@ -1032,12 +1036,14 @@ class TestRunner:
                         proof_bytes, proof_flags, leaves_bytes
                     ).estimate_gas()
                     
+                    onchain_verification_time = time.time() - onchain_start
+                    
                     if is_valid:
                         print(f"      ✅ On-chain traditional multiproof verification successful - Gas used: {gas_used:,}")
-                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost}
+                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': onchain_verification_time}
                     else:
                         print(f"      ❌ On-chain verification returned False - proof is invalid")
-                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': onchain_verification_time}
                     
                 except Exception as e:
                     print(f"      ❌ On-chain verification failed: {e}")
@@ -1080,12 +1086,16 @@ class TestRunner:
             
             # On-chain verification if Web3 available
             gas_used = 0
+            onchain_verification_time = 0
             if self.web3 and self.traditional_document_huffman_contract:
                 try:
                     # New pathMap verification format
                     leaves_bytes = [bytes.fromhex(leaf.replace('0x', '')) for leaf in pathmap_proof['leaves']]
                     proof_hashes_bytes = [bytes.fromhex(ph.replace('0x', '')) for ph in pathmap_proof['proofHashes']]
                     path_map = pathmap_proof['pathMap']
+                    
+                    # Time only the on-chain verification calls
+                    onchain_start = time.time()
                     
                     # Call contract verification with pathMap format and check boolean return value
                     is_valid = self.traditional_document_huffman_contract.functions.verifyBatch(
@@ -1097,18 +1107,20 @@ class TestRunner:
                         leaves_bytes, proof_hashes_bytes, path_map
                     ).estimate_gas()
                     
+                    onchain_verification_time = time.time() - onchain_start
+                    
                     if is_valid:
                         print(f"      ✅ On-chain pathMap verification successful - Gas used: {gas_used:,}")
-                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size}
+                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'onchain_verification_time': onchain_verification_time}
                     else:
                         print(f"      ❌ On-chain verification returned False - proof is invalid")
-                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size}
+                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'onchain_verification_time': onchain_verification_time}
                 except Exception as e:
                     print(f"      ❌ On-chain verification failed: {e}")
-                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size}
+                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size, 'onchain_verification_time': onchain_verification_time}
             else:
                 print(f"    ⚠️ No Web3 connection or contract - skipping on-chain verification")
-                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size}
+                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size, 'onchain_verification_time': 0}
             
         except Exception as e:
             return {'success': False, 'error': str(e)}
@@ -1162,11 +1174,15 @@ class TestRunner:
             
             # On-chain verification if Web3 available
             gas_used = 0
+            onchain_verification_time = 0
             if self.web3 and self.traditional_property_level_huffman_contract:
                 try:
                     # New bitmap verification format
                     inputs_bytes = [bytes.fromhex(h.replace('0x', '')) for h in bitmap_proof['inputs']]
                     bitmap = bitmap_proof['bitmap']
+                    
+                    # Time only the on-chain verification calls
+                    onchain_start = time.time()
                     
                     # Call contract verification with bitmap format and check boolean return value
                     is_valid = self.traditional_property_level_huffman_contract.functions.verifyBatch(
@@ -1178,9 +1194,11 @@ class TestRunner:
                         inputs_bytes, bitmap
                     ).estimate_gas()
                     
+                    onchain_verification_time = time.time() - onchain_start
+                    
                     if is_valid:
                         print(f"      ✅ On-chain bitmap verification successful - Gas used: {gas_used:,}")
-                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost}
+                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': onchain_verification_time}
                     else:
                         # Debug: check stored root vs expected root
                         stored_root = self.traditional_property_level_huffman_contract.functions.merkleRoot().call()
@@ -1190,30 +1208,15 @@ class TestRunner:
                         print(f"         Stored root:   0x{stored_root.hex()[:16]}...")
                         if stored_root.hex() != expected_root:
                             print(f"         ⚠️ ROOT MISMATCH detected!")
-                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': onchain_verification_time}
                 except Exception as e:
                     print(f"      ❌ On-chain verification failed: {e}")
                     import traceback
                     traceback.print_exc()
-                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size}
-                    path_map = pathmap_proof['pathMap']
-                    
-                    # Call contract verification with pathMap format
-                    tx_hash = self.traditional_property_level_huffman_contract.functions.verifyBatch(
-                        leaves_bytes, proof_hashes_bytes, path_map
-                    ).transact()
-                    
-                    receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-                    gas_used = receipt.gasUsed
-                    print(f"      ✅ On-chain pathMap verification successful - Gas used: {gas_used:,}")
-                    
-                    return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost}
-                except Exception as e:
-                    print(f"      ❌ On-chain verification failed: {e}")
-                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size, 'onchain_verification_time': onchain_verification_time}
             else:
                 print(f"    ⚠️ No Web3 connection or contract - skipping on-chain verification")
-                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': 0}
             
         except Exception as e:
             return {'success': False, 'error': str(e)}
@@ -1244,12 +1247,16 @@ class TestRunner:
             
             # On-chain verification if Web3 available
             gas_used = 0
+            onchain_verification_time = 0
             if self.web3 and self.clustered_province_contract:
                 try:
                     # Convert to bytes for OpenZeppelin multiproof format
                     # IMPORTANT: Use leaves_in_order (tree-index order), NOT sorted by hash!
                     proof_bytes = [bytes.fromhex(p.replace('0x', '')) for p in proof]
                     leaves_bytes = [bytes.fromhex(leaf.replace('0x', '')) for leaf in leaves_in_order]
+                    
+                    # Time only the on-chain verification calls
+                    onchain_start = time.time()
                     
                     # Call contract verification with OpenZeppelin format and check boolean return value
                     is_valid = self.clustered_province_contract.functions.verifyBatch(
@@ -1261,18 +1268,20 @@ class TestRunner:
                         proof_bytes, proof_flags, leaves_bytes
                     ).estimate_gas()
                     
+                    onchain_verification_time = time.time() - onchain_start
+                    
                     if is_valid:
                         print(f"      ✅ On-chain OpenZeppelin multiproof verification successful - Gas used: {gas_used:,}")
-                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost}
+                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': onchain_verification_time}
                     else:
                         print(f"      ❌ On-chain verification returned False - proof is invalid")
-                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': onchain_verification_time}
                 except Exception as e:
                     print(f"      ❌ On-chain verification failed: {e}")
-                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': onchain_verification_time}
             else:
                 print(f"    ⚠️ No Web3 connection or contract - skipping on-chain verification")
-                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': 0}
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
@@ -1318,11 +1327,15 @@ class TestRunner:
             
             # On-chain verification if Web3 available
             gas_used = 0
+            onchain_verification_time = 0
             if self.web3 and self.clustered_province_with_document_huffman_contract:
                 try:
                     # New bitmap verification format
                     inputs_bytes = [bytes.fromhex(h.replace('0x', '')) for h in bitmap_proof['inputs']]
                     bitmap = bitmap_proof['bitmap']
+                    
+                    # Time only the on-chain verification calls
+                    onchain_start = time.time()
                     
                     # Call contract verification with bitmap format and check boolean return value
                     is_valid = self.clustered_province_with_document_huffman_contract.functions.verifyBatch(
@@ -1334,9 +1347,11 @@ class TestRunner:
                         inputs_bytes, bitmap
                     ).estimate_gas()
                     
+                    onchain_verification_time = time.time() - onchain_start
+                    
                     if is_valid:
                         print(f"      ✅ On-chain bitmap verification successful - Gas used: {gas_used:,}")
-                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost}
+                        return {'success': True, 'gas_used': gas_used, 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': onchain_verification_time}
                     else:
                         # Debug: check stored root vs expected root
                         stored_root = self.clustered_province_with_document_huffman_contract.functions.merkleRoot().call()
@@ -1349,15 +1364,15 @@ class TestRunner:
                         print(f"         Stored root:   0x{stored_root.hex()[:16]}...")
                         if expected_root and stored_root.hex() != expected_root:
                             print(f"         ⚠️ ROOT MISMATCH detected!")
-                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                        return {'success': False, 'error': 'Verification returned False', 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': onchain_verification_time}
                 except Exception as e:
                     print(f"      ❌ On-chain verification failed: {e}")
                     import traceback
                     traceback.print_exc()
-                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                    return {'success': False, 'error': f'On-chain verification failed: {e}', 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': onchain_verification_time}
             else:
                 print(f"    ⚠️ No Web3 connection or contract - skipping on-chain verification")
-                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size, 'communication_cost': communication_cost}
+                return {'success': False, 'error': 'No Web3 connection or contract available', 'proof_size': proof_size, 'communication_cost': communication_cost, 'onchain_verification_time': 0}
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
@@ -1449,6 +1464,7 @@ class TestRunner:
             
             # On-chain verification using JurisdictionTreeVerifier contract
             gas_used = 0
+            onchain_verification_time = 0
             if self.web3 and self.jurisdiction_tree_contract:
                 try:
                     print(f"      🔗 Performing on-chain two-phase verification...")
@@ -1487,6 +1503,9 @@ class TestRunner:
                     # Get jurisdiction root
                     jurisdiction_root_bytes = bytes.fromhex(builder.jurisdiction_root.replace('0x', ''))
                     
+                    # Time only the on-chain verification calls
+                    onchain_start = time.time()
+                    
                     # Call contract verification
                     tx_hash = self.jurisdiction_tree_contract.functions.verifyTwoPhase(
                         province_proofs,
@@ -1496,6 +1515,8 @@ class TestRunner:
                     
                     receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
                     gas_used = receipt.gasUsed
+                    
+                    onchain_verification_time = time.time() - onchain_start
                     
                     # Check if transaction succeeded (no revert)
                     contract_success = receipt.status == 1
@@ -1507,7 +1528,8 @@ class TestRunner:
                         'gas_used': gas_used,
                         'proof_size': proof_size,
                         'two_phase_proof': two_phase_proof,
-                        'verification_details': verification_details
+                        'verification_details': verification_details,
+                        'onchain_verification_time': onchain_verification_time
                     }
                     
                 except Exception as e:
@@ -1518,7 +1540,8 @@ class TestRunner:
                         'gas_used': 0,
                         'proof_size': proof_size,
                         'error': f'On-chain verification failed: {e}',
-                        'verification_details': verification_details
+                        'verification_details': verification_details,
+                        'onchain_verification_time': onchain_verification_time
                     }
             else:
                 print(f"      ⚠️ No Web3 connection or jurisdiction contract - using local verification only")
@@ -1527,7 +1550,8 @@ class TestRunner:
                     'gas_used': 0,
                     'proof_size': proof_size,
                     'two_phase_proof': two_phase_proof,
-                    'verification_details': verification_details
+                    'verification_details': verification_details,
+                    'onchain_verification_time': 0
                 }
             
         except Exception as e:
@@ -2189,6 +2213,8 @@ def main():
                        help='Alpha values to test during hyperparameter tuning (default: [0.05, 0.2, 0.4, 0.5, 0.7, 0.8])')
     parser.add_argument('--alpha-overrides', type=str, default=None,
                        help='Optional per-model alpha overrides, format: model1:0.05,model2=0.2 (keys: traditional_document_huffman, traditional_property_level_huffman, clustered_province_with_document_huffman, jurisdiction_tree)')
+    parser.add_argument('--property-zipf-s', type=float, default=1.2,
+                       help='Zipfian exponent s for property access frequency (default: 1.2, empirically derived from population data)')
 
     args = parser.parse_args()
 
@@ -2210,15 +2236,15 @@ def main():
     transactional_pattern = TransactionalPattern(
         document_importance_map=DOCUMENT_IMPORTANCE_MAP,
         alpha_threshold=0.15,         # Lower threshold for more pair detection
-        use_zipfian=True,             # Enable realistic heavy-tail distribution for documents
-        zipf_parameter=1.05,          # Zipfian exponent s=1.05 (mild concentration)
+        use_zipfian=False,            # Documents are balanced, use importance map instead
+        zipf_parameter=1.0,           # Not used (disabled)
         use_property_zipfian=True,    # Enable property-level Zipfian distribution
-        property_zipf_parameter=1.05, # Zipfian exponent s=1.05 (mild concentration)
+        property_zipf_parameter=args.property_zipf_s,  # Configurable via --property-zipf-s
         random_seed=42                # Fixed seed for reproducible patterns
     )
     audit_pattern = AuditPattern(
         province_weights=seed_gen.province_weights,
-        avg_sample_size=75,        # λ for properties per province (realistic average)
+        avg_sample_size=200,        # λ for properties per province (realistic average)
         min_sample_size=10,        # Minimum to ensure meaningful audit samples
         avg_docs_per_property=3,   # λ for documents per property (realistic average)
         min_docs_per_property=1,   # Minimum to ensure at least one document
