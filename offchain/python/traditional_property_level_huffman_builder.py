@@ -513,9 +513,79 @@ class TraditionalPropertyLevelHuffmanBuilder:
         # Step 4: Compute Merkle root from the unbalanced Huffman structure
         self.merkle_root = self._compute_unbalanced_merkle_root()
         
+        # Step 5: Pre-compute caches for fast proof generation
+        # These are expensive traversals that we do ONCE at build time, not per-query
+        print(f"  Pre-computing proof generation caches...")
+        self._precompute_proof_caches()
+        
         print(f"  Traditional Property-Level Huffman Tree Root (unbalanced): {self.merkle_root[:16]}...")
         
         return self.merkle_root
+    
+    def _precompute_proof_caches(self):
+        """
+        Pre-compute all caches needed for fast proof generation.
+        
+        This method is called ONCE at build time and caches:
+        1. doc_to_property: Maps document hash -> property node
+        2. node_hash_cache: Maps node id -> computed hash
+        3. property_hash_cache: Maps property node id -> its hash
+        
+        This eliminates the need to traverse the entire tree on every proof generation.
+        """
+        # Cache 1: doc_to_property mapping
+        self._cached_doc_to_property = {}
+        
+        if self.property_huffman_root:
+            stack = [self.property_huffman_root]
+            while stack:
+                current = stack.pop()
+                if current is None:
+                    continue
+                if current.property_group is not None:
+                    for doc in current.property_group.optimized_document_order:
+                        self._cached_doc_to_property[doc.hash_hex] = current
+                else:
+                    if current.right:
+                        stack.append(current.right)
+                    if current.left:
+                        stack.append(current.left)
+        
+        # Cache 2 & 3: node_hash_cache and property_hash_cache
+        self._cached_node_hash = {}
+        self._cached_property_hash = {}
+        
+        if self.property_huffman_root:
+            stack = []
+            last_visited = None
+            current = self.property_huffman_root
+            
+            while stack or current:
+                if current:
+                    stack.append(current)
+                    current = current.left
+                else:
+                    peek = stack[-1]
+                    if peek.right and last_visited != peek.right:
+                        current = peek.right
+                    else:
+                        if peek.property_group is not None:
+                            # Property node - compute balanced subtree hash
+                            doc_hashes = [d.hash_hex for d in peek.property_group.optimized_document_order]
+                            if len(doc_hashes) == 1:
+                                self._cached_node_hash[id(peek)] = doc_hashes[0]
+                            else:
+                                self._cached_node_hash[id(peek)] = self._compute_balanced_subtree_hash(doc_hashes)
+                            self._cached_property_hash[id(peek)] = self._cached_node_hash[id(peek)]
+                        else:
+                            left_h = self._cached_node_hash.get(id(peek.left), keccak(b'').hex()) if peek.left else keccak(b'').hex()
+                            right_h = self._cached_node_hash.get(id(peek.right), keccak(b'').hex()) if peek.right else keccak(b'').hex()
+                            self._cached_node_hash[id(peek)] = combine_and_hash(left_h, right_h)
+                        stack.pop()
+                        last_visited = peek
+                        current = None
+        
+        print(f"    Cached {len(self._cached_doc_to_property)} doc->property mappings, {len(self._cached_node_hash)} node hashes")
     
     def _build_property_huffman_tree(self, property_groups, property_freq, pair_freq):
         """Build true unbalanced Huffman tree at property level."""
@@ -1877,35 +1947,39 @@ class TraditionalPropertyLevelHuffmanBuilder:
         2. All ancestors of requested leaves up to the root
         3. All sibling hashes needed for verification
         
+        OPTIMIZED: Uses pre-computed caches from build time to avoid full tree traversals.
+        
         Returns:
             ProofNode: Root of the proof tree
         """
         # Sort and deduplicate leaves
         sorted_leaves = sorted(set(leaves_to_prove_hex))
         
-        # Step 1: Map documents to their property nodes in the Huffman tree
-        doc_to_property = {}
+        # Step 1: Use CACHED doc_to_property mapping (O(1) lookup instead of O(n) traversal)
+        doc_to_property = getattr(self, '_cached_doc_to_property', None)
         
-        def collect_property_mappings(node):
-            if node is None:
-                return
-            stack = [node]
-            while stack:
-                current = stack.pop()
-                if current is None:
-                    continue
-                if current.property_group is not None:
-                    for doc in current.property_group.optimized_document_order:
-                        doc_to_property[doc.hash_hex] = current
-                else:
-                    if current.right:
-                        stack.append(current.right)
-                    if current.left:
-                        stack.append(current.left)
+        # Fallback to computing if cache doesn't exist (for backwards compatibility)
+        if doc_to_property is None:
+            doc_to_property = {}
+            def collect_property_mappings(node):
+                if node is None:
+                    return
+                stack = [node]
+                while stack:
+                    current = stack.pop()
+                    if current is None:
+                        continue
+                    if current.property_group is not None:
+                        for doc in current.property_group.optimized_document_order:
+                            doc_to_property[doc.hash_hex] = current
+                    else:
+                        if current.right:
+                            stack.append(current.right)
+                        if current.left:
+                            stack.append(current.left)
+            collect_property_mappings(self.property_huffman_root)
         
-        collect_property_mappings(self.property_huffman_root)
-        
-        # Step 2: Group requested documents by property
+        # Step 2: Group requested documents by property (O(k) where k = number of leaves to prove)
         property_to_docs = {}
         for doc_hash in sorted_leaves:
             if doc_hash in doc_to_property:
@@ -1917,45 +1991,50 @@ class TraditionalPropertyLevelHuffmanBuilder:
         if not property_to_docs:
             return None
         
-        # Step 3: Pre-compute all hashes in the Huffman tree
-        node_hash_cache = {}
-        property_hash_cache = {}  # Maps property node id -> its hash
+        # Step 3: Use CACHED node_hash_cache (O(1) lookup instead of O(n) traversal)
+        node_hash_cache = getattr(self, '_cached_node_hash', None)
+        property_hash_cache = getattr(self, '_cached_property_hash', None)
         
-        def compute_all_hashes(node):
-            """Compute hashes for all nodes using post-order traversal."""
-            if node is None:
-                return keccak(b'').hex()
+        # Fallback to computing if cache doesn't exist
+        if node_hash_cache is None:
+            node_hash_cache = {}
+            property_hash_cache = {}
             
-            stack = []
-            last_visited = None
-            current = node
-            
-            while stack or current:
-                if current:
-                    stack.append(current)
-                    current = current.left
-                else:
-                    peek = stack[-1]
-                    if peek.right and last_visited != peek.right:
-                        current = peek.right
+            def compute_all_hashes(node):
+                """Compute hashes for all nodes using post-order traversal."""
+                if node is None:
+                    return keccak(b'').hex()
+                
+                stack = []
+                last_visited = None
+                current = node
+                
+                while stack or current:
+                    if current:
+                        stack.append(current)
+                        current = current.left
                     else:
-                        if peek.property_group is not None:
-                            # Property node - compute balanced subtree hash
-                            doc_hashes = [d.hash_hex for d in peek.property_group.optimized_document_order]
-                            if len(doc_hashes) == 1:
-                                node_hash_cache[id(peek)] = doc_hashes[0]
-                            else:
-                                node_hash_cache[id(peek)] = self._compute_balanced_subtree_hash(doc_hashes)
-                            property_hash_cache[id(peek)] = node_hash_cache[id(peek)]
+                        peek = stack[-1]
+                        if peek.right and last_visited != peek.right:
+                            current = peek.right
                         else:
-                            left_h = node_hash_cache.get(id(peek.left), keccak(b'').hex()) if peek.left else keccak(b'').hex()
-                            right_h = node_hash_cache.get(id(peek.right), keccak(b'').hex()) if peek.right else keccak(b'').hex()
-                            node_hash_cache[id(peek)] = combine_and_hash(left_h, right_h)
-                        stack.pop()
-                        last_visited = peek
-                        current = None
-        
-        compute_all_hashes(self.property_huffman_root)
+                            if peek.property_group is not None:
+                                # Property node - compute balanced subtree hash
+                                doc_hashes = [d.hash_hex for d in peek.property_group.optimized_document_order]
+                                if len(doc_hashes) == 1:
+                                    node_hash_cache[id(peek)] = doc_hashes[0]
+                                else:
+                                    node_hash_cache[id(peek)] = self._compute_balanced_subtree_hash(doc_hashes)
+                                property_hash_cache[id(peek)] = node_hash_cache[id(peek)]
+                            else:
+                                left_h = node_hash_cache.get(id(peek.left), keccak(b'').hex()) if peek.left else keccak(b'').hex()
+                                right_h = node_hash_cache.get(id(peek.right), keccak(b'').hex()) if peek.right else keccak(b'').hex()
+                                node_hash_cache[id(peek)] = combine_and_hash(left_h, right_h)
+                            stack.pop()
+                            last_visited = peek
+                            current = None
+            
+            compute_all_hashes(self.property_huffman_root)
         
         # Step 4: Mark which Huffman tree nodes are needed
         node_needed = {}

@@ -245,7 +245,7 @@ def main():
     create_grouped_bar_chart(
         communication_costs,
         'Average Communication Cost Comparison',
-        'Average Communication Cost (32-byte units)',
+        'Average Communication Cost (Number of Nodes)',
         'average_communication_cost.png',
         output_dir
     )
