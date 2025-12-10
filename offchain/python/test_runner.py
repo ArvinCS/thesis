@@ -2215,6 +2215,8 @@ def main():
                        help='Optional per-model alpha overrides, format: model1:0.05,model2=0.2 (keys: traditional_document_huffman, traditional_property_level_huffman, clustered_province_with_document_huffman, jurisdiction_tree)')
     parser.add_argument('--property-zipf-s', type=float, default=1.2,
                        help='Zipfian exponent s for property access frequency (default: 1.2, empirically derived from population data)')
+    parser.add_argument('--audit-sample-size', type=int, default=200,
+                       help='Average number of properties per audit query (lambda, default: 200)')
 
     args = parser.parse_args()
 
@@ -2244,9 +2246,9 @@ def main():
     )
     audit_pattern = AuditPattern(
         province_weights=seed_gen.province_weights,
-        avg_sample_size=200,        # λ for properties per province (realistic average)
+        avg_sample_size=args.audit_sample_size,  # Configurable via --audit-sample-size
         min_sample_size=10,        # Minimum to ensure meaningful audit samples
-        avg_docs_per_property=3,   # λ for documents per property (realistic average)
+        avg_docs_per_property=2,   # λ for documents per property (realistic average)
         min_docs_per_property=1,   # Minimum to ensure at least one document
         random_seed=42             # Fixed seed for reproducible patterns
     )
