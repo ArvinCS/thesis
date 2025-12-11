@@ -99,7 +99,7 @@ def plot_zipf_sensitivity(output_path, base_path):
     mhybrid_avg = np.mean(data['clustered_province_with_document_huffman'])
     clustered_avg = np.mean(data['clustered_province'])
     improvement = (baseline_avg - mhybrid_avg) / baseline_avg * 100
-    ax.annotate(f'M_hybrid: {improvement:.1f}% avg improvement vs baseline',
+    ax.annotate(f'Our model: {improvement:.1f}% avg improvement vs baseline',
                 xy=(1.2, mhybrid_avg/1000), 
                 xytext=(1.12, clustered_avg/1000 + 5),  # Position above green line
                 fontsize=9, style='italic', color='#9B59B6',
@@ -139,22 +139,25 @@ def plot_audit_sensitivity(output_path, base_path):
     # Format y-axis with thousands separator
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{int(x):,}'))
     
-    # Add scaling annotation
-    if all(v is not None for v in data['clustered_province']) and all(v is not None for v in data['traditional_property_level_huffman']):
-        clustered_50 = data['clustered_province'][0]
-        clustered_150 = data['clustered_province'][2]
+    # Add scaling annotation - compare M_hybrid to Global Huffman
+    if all(v is not None for v in data['clustered_province_with_document_huffman']) and all(v is not None for v in data['traditional_property_level_huffman']):
+        hybrid_50 = data['clustered_province_with_document_huffman'][0]
+        hybrid_100 = data['clustered_province_with_document_huffman'][1]
+        hybrid_150 = data['clustered_province_with_document_huffman'][2]
         huffman_50 = data['traditional_property_level_huffman'][0]
+        huffman_100 = data['traditional_property_level_huffman'][1]
         huffman_150 = data['traditional_property_level_huffman'][2]
         
-        advantage_50 = (huffman_50 - clustered_50) / huffman_50 * 100
-        advantage_150 = (huffman_150 - clustered_150) / huffman_150 * 100
+        advantage_50 = (huffman_50 - hybrid_50) / huffman_50 * 100
+        advantage_100 = (huffman_100 - hybrid_100) / huffman_100 * 100
+        advantage_150 = (huffman_150 - hybrid_150) / huffman_150 * 100
         
-        ax.annotate(f'Clustered models:\n{advantage_50:.1f}%-{advantage_150:.1f}% better\nthan Global Huffman',
-                    xy=(100, data['clustered_province'][1]/1000),
-                    xytext=(115, data['clustered_province'][1]/1000 - 250),
-                    fontsize=9, style='italic', color='#2ECC71',
+        ax.annotate(f'Our model: {min(advantage_50,advantage_100,advantage_150):.1f}%-{max(advantage_50, advantage_100, advantage_150):.1f}% better than Global Huffman',
+                    xy=(100, data['clustered_province_with_document_huffman'][1]/1000),
+                    xytext=(115, data['clustered_province_with_document_huffman'][1]/1000 - 250),
+                    fontsize=9, style='italic', color='#9B59B6',
                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
-                    arrowprops=dict(arrowstyle='->', color='#2ECC71', alpha=0.7))
+                    arrowprops=dict(arrowstyle='->', color='#9B59B6', alpha=0.7))
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
